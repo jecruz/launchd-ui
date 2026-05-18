@@ -46,3 +46,70 @@ export type LaunchdJob = {
   plist: PlistConfig
   last_run_at: string | null
 }
+
+export type AgentRuntimeProvider = "LlamaCpp" | "Ollama" | "LocalCli"
+export type PromptInputMode = "Stdin" | "Argument"
+
+export type AgentRuntimeSettings = {
+  provider: AgentRuntimeProvider
+  system_prompt: string
+  llama_cpp_executable_path: string
+  llama_cpp_model_path: string
+  llama_cpp_prompt_flag: string
+  llama_cpp_model_flag: string
+  llama_cpp_extra_args: string
+  ollama_executable_path: string
+  ollama_model: string
+  ollama_host: string
+  local_cli_executable_path: string
+  local_cli_args_template: string
+  local_cli_prompt_mode: PromptInputMode
+  local_cli_prompt_argument: string
+}
+
+export type AgentRuntimeSummary = {
+  provider: AgentRuntimeProvider
+  provider_label: string
+  configured: boolean
+  details: string[]
+  readiness_checks: AgentRuntimeReadinessCheck[]
+}
+
+export type AgentRuntimeReadinessCheck = {
+  label: string
+  status: "ready" | "missing"
+  detail: string
+}
+
+export type AgentRuntimeResult = {
+  response: string
+  command_line: string
+}
+
+export type ApprovedAgentActionKind =
+  | "Start"
+  | "Stop"
+  | "Restart"
+  | "Kickstart"
+  | "Enable"
+  | "Disable"
+
+export type ApprovedAgentActionRequest = {
+  plist_path: string
+  label: string
+  command_proposal: string
+}
+
+export type ApprovedAgentActionResult = {
+  action: ApprovedAgentActionKind
+  command: string
+  verified_status: JobStatus
+  verified_pid: number | null
+  verified_last_exit_code: number | null
+}
+
+export type AgentPromptRequest = {
+  prompt: string
+  job_context: string | null
+  mode: string
+}

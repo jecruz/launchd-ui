@@ -1,9 +1,11 @@
+use crate::agent_runtime;
 use crate::error::AppError;
 use crate::launchctl;
 use crate::plist_util;
 use crate::types::PlistConfig;
 use crate::types::{JobListEntry, JobStatus, LaunchdJob};
 use std::collections::HashMap;
+use std::path::Path;
 
 fn get_last_run_at(config: &PlistConfig) -> Option<String> {
     let paths = [&config.standard_out_path, &config.standard_error_path];
@@ -33,6 +35,115 @@ fn ensure_user_agent(plist_path: &str) -> Result<(), AppError> {
         ));
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum ApprovedAgentActionKind {
+    Start,
+    Stop,
+    Restart,
+    Kickstart,
+    Enable,
+    Disable,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ApprovedAgentActionRequest {
+    pub plist_path: String,
+    pub label: String,
+    pub command_proposal: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ApprovedAgentActionResult {
+    pub action: ApprovedAgentActionKind,
+    pub command: String,
+    pub verified_status: JobStatus,
+    pub verified_pid: Option<u32>,
+    pub verified_last_exit_code: Option<i32>,
+}
+
+fn classify_command_proposal(command_proposal: &str) -> Result<ApprovedAgentActionKind, AppError> {
+    let text = command_proposal.to_lowercase();
+    let words: Vec<&str> = text
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let has_word = |needle: &str| words.contains(&needle);
+    let has_phrase = |needle: &str| text.contains(needle);
+
+    let mut candidates = Vec::new();
+    let is_restart = has_word("restart") || (has_word("bootout") && has_word("bootstrap"));
+
+    if is_restart {
+        candidates.push(ApprovedAgentActionKind::Restart);
+    }
+    if !is_restart
+        && (has_phrase("launchctl bootstrap") || has_phrase("launchctl start") || has_word("start"))
+    {
+        candidates.push(ApprovedAgentActionKind::Start);
+    }
+    if !is_restart
+        && (has_phrase("launchctl bootout")
+            || has_phrase("launchctl stop")
+            || has_word("stop")
+            || has_word("unload"))
+    {
+        candidates.push(ApprovedAgentActionKind::Stop);
+    }
+    if has_phrase("launchctl kickstart") || has_word("kickstart") || has_word("-k") {
+        candidates.push(ApprovedAgentActionKind::Kickstart);
+    }
+    if has_phrase("launchctl enable") || has_word("enable") {
+        candidates.push(ApprovedAgentActionKind::Enable);
+    }
+    if has_phrase("launchctl disable") || has_word("disable") {
+        candidates.push(ApprovedAgentActionKind::Disable);
+    }
+
+    candidates.dedup();
+
+    match candidates.as_slice() {
+        [action] => Ok(action.clone()),
+        [] => Err(AppError::AgentRuntime(
+            "command proposal did not match a supported launchd action".to_string(),
+        )),
+        _ => Err(AppError::AgentRuntime(
+            "command proposal matched multiple launchd actions".to_string(),
+        )),
+    }
+}
+
+fn approved_action_command(
+    action: &ApprovedAgentActionKind,
+    label: &str,
+    plist_path: &str,
+) -> String {
+    let gui_target = launchctl::gui_target();
+    let service_target = launchctl::service_target(label);
+
+    match action {
+        ApprovedAgentActionKind::Start => {
+            format!("launchctl bootstrap {gui_target} {plist_path}")
+        }
+        ApprovedAgentActionKind::Stop => {
+            format!("launchctl bootout {gui_target} {plist_path}")
+        }
+        ApprovedAgentActionKind::Restart => {
+            format!(
+                "launchctl bootout {gui_target} {plist_path} && launchctl bootstrap {gui_target} {plist_path}"
+            )
+        }
+        ApprovedAgentActionKind::Kickstart => {
+            format!("launchctl kickstart -k {service_target}")
+        }
+        ApprovedAgentActionKind::Enable => {
+            format!("launchctl enable {service_target}")
+        }
+        ApprovedAgentActionKind::Disable => {
+            format!("launchctl disable {service_target}")
+        }
+    }
 }
 
 #[tauri::command]
@@ -154,12 +265,14 @@ pub async fn kickstart_job(label: String, plist_path: String) -> Result<(), AppE
 }
 
 #[tauri::command]
-pub async fn enable_job(label: String) -> Result<(), AppError> {
+pub async fn enable_job(label: String, plist_path: String) -> Result<(), AppError> {
+    ensure_user_agent(&plist_path)?;
     launchctl::enable(&label)
 }
 
 #[tauri::command]
-pub async fn disable_job(label: String) -> Result<(), AppError> {
+pub async fn disable_job(label: String, plist_path: String) -> Result<(), AppError> {
+    ensure_user_agent(&plist_path)?;
     launchctl::disable(&label)
 }
 
@@ -289,4 +402,178 @@ pub async fn reveal_in_finder(path: String) -> Result<(), AppError> {
         .arg(&path)
         .spawn()?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_agent_runtime_settings() -> Result<agent_runtime::AgentRuntimeSettings, AppError> {
+    agent_runtime::load_agent_runtime_settings()
+}
+
+#[tauri::command]
+pub async fn save_agent_runtime_settings(
+    settings: agent_runtime::AgentRuntimeSettings,
+) -> Result<agent_runtime::AgentRuntimeSettings, AppError> {
+    agent_runtime::save_agent_runtime_settings(&settings)?;
+    Ok(settings)
+}
+
+#[tauri::command]
+pub async fn run_agent_prompt(
+    request: agent_runtime::AgentPromptRequest,
+) -> Result<agent_runtime::AgentRuntimeResult, AppError> {
+    let settings = agent_runtime::load_agent_runtime_settings()?;
+    agent_runtime::run_agent_prompt(&settings, &request)
+}
+
+#[tauri::command]
+pub async fn get_agent_runtime_summary() -> Result<agent_runtime::AgentRuntimeSummary, AppError> {
+    let settings = agent_runtime::load_agent_runtime_settings()?;
+    Ok(agent_runtime::summarize_settings(&settings))
+}
+
+#[tauri::command]
+pub async fn apply_approved_agent_action(
+    request: ApprovedAgentActionRequest,
+) -> Result<ApprovedAgentActionResult, AppError> {
+    ensure_user_agent(&request.plist_path)?;
+
+    if !Path::new(&request.plist_path).exists() {
+        return Err(AppError::NotFound(request.plist_path));
+    }
+
+    let action = classify_command_proposal(&request.command_proposal)?;
+    let command = match action {
+        ApprovedAgentActionKind::Start => {
+            start_job(request.plist_path.clone()).await?;
+            approved_action_command(&action, &request.label, &request.plist_path)
+        }
+        ApprovedAgentActionKind::Stop => {
+            stop_job(request.plist_path.clone()).await?;
+            approved_action_command(&action, &request.label, &request.plist_path)
+        }
+        ApprovedAgentActionKind::Restart => {
+            restart_job(request.plist_path.clone()).await?;
+            approved_action_command(&action, &request.label, &request.plist_path)
+        }
+        ApprovedAgentActionKind::Kickstart => {
+            kickstart_job(request.label.clone(), request.plist_path.clone()).await?;
+            approved_action_command(&action, &request.label, &request.plist_path)
+        }
+        ApprovedAgentActionKind::Enable => {
+            enable_job(request.label.clone(), request.plist_path.clone()).await?;
+            approved_action_command(&action, &request.label, &request.plist_path)
+        }
+        ApprovedAgentActionKind::Disable => {
+            disable_job(request.label.clone(), request.plist_path.clone()).await?;
+            approved_action_command(&action, &request.label, &request.plist_path)
+        }
+    };
+    let verified = get_job_detail(request.plist_path.clone()).await?;
+
+    Ok(ApprovedAgentActionResult {
+        action,
+        command,
+        verified_status: verified.status,
+        verified_pid: verified.pid,
+        verified_last_exit_code: verified.last_exit_code,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_user_agent_accepts_home_launch_agents() {
+        let path = dirs::home_dir()
+            .expect("home dir")
+            .join("Library/LaunchAgents/com.example.test.plist");
+
+        assert!(ensure_user_agent(path.to_str().expect("path str")).is_ok());
+    }
+
+    #[test]
+    fn ensure_user_agent_rejects_system_launch_agents() {
+        let result = ensure_user_agent("/Library/LaunchAgents/com.example.test.plist");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn classifies_supported_command_proposals() {
+        let cases = [
+            (
+                "launchctl bootstrap gui/501 /Users/me/Library/LaunchAgents/com.example.plist",
+                ApprovedAgentActionKind::Start,
+            ),
+            (
+                "launchctl bootout gui/501 /Users/me/Library/LaunchAgents/com.example.plist",
+                ApprovedAgentActionKind::Stop,
+            ),
+            ("restart the selected job", ApprovedAgentActionKind::Restart),
+            (
+                "launchctl kickstart -k gui/501/com.example",
+                ApprovedAgentActionKind::Kickstart,
+            ),
+            (
+                "launchctl enable gui/501/com.example",
+                ApprovedAgentActionKind::Enable,
+            ),
+            (
+                "launchctl disable gui/501/com.example",
+                ApprovedAgentActionKind::Disable,
+            ),
+        ];
+
+        for (proposal, expected) in cases {
+            assert_eq!(classify_command_proposal(proposal).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn rejects_ambiguous_command_proposals() {
+        let result = classify_command_proposal(
+            "launchctl disable gui/501/com.example, then launchctl enable gui/501/com.example",
+        );
+
+        assert!(
+            matches!(result, Err(AppError::AgentRuntime(message)) if message.contains("multiple"))
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_shell_text() {
+        let result = classify_command_proposal("rm -rf ~/Library/LaunchAgents/com.example.plist");
+
+        assert!(
+            matches!(result, Err(AppError::AgentRuntime(message)) if message.contains("supported"))
+        );
+    }
+
+    #[test]
+    fn approved_action_command_uses_exact_targets() {
+        let command = approved_action_command(
+            &ApprovedAgentActionKind::Kickstart,
+            "com.example.test",
+            "/Users/me/Library/LaunchAgents/com.example.test.plist",
+        );
+
+        assert!(command.starts_with("launchctl kickstart -k gui/"));
+        assert!(command.ends_with("/com.example.test"));
+        assert!(!command.contains("<uid>"));
+    }
+
+    #[test]
+    fn approved_action_command_uses_plist_path_for_bootstrap() {
+        let plist_path = "/Users/me/Library/LaunchAgents/com.example.test.plist";
+        let command = approved_action_command(
+            &ApprovedAgentActionKind::Start,
+            "com.example.test",
+            plist_path,
+        );
+
+        assert!(command.starts_with("launchctl bootstrap gui/"));
+        assert!(command.ends_with(plist_path));
+        assert!(!command.contains("<uid>"));
+    }
 }

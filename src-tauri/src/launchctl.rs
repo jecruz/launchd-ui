@@ -13,11 +13,11 @@ fn get_uid() -> u32 {
         .expect("failed to parse uid")
 }
 
-fn gui_target() -> String {
+pub(crate) fn gui_target() -> String {
     format!("gui/{}", get_uid())
 }
 
-fn service_target(label: &str) -> String {
+pub(crate) fn service_target(label: &str) -> String {
     format!("{}/{}", gui_target(), label)
 }
 

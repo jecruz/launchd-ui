@@ -12,11 +12,12 @@
   "app": {
     "windows": [
       {
-        "title": "launchd-ui",
-        "width": 1000,
-        "height": 700,
+        "title": "Launch Control",
+        "width": 1200,
+        "height": 820,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "visible": false
       }
     ],
     "security": {

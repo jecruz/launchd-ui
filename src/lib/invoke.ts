@@ -1,5 +1,15 @@
 import { invoke } from "@tauri-apps/api/core"
-import type { JobListEntry, LaunchdJob, PlistConfig } from "@/types"
+import type {
+  AgentPromptRequest,
+  AgentRuntimeResult,
+  AgentRuntimeSettings,
+  AgentRuntimeSummary,
+  ApprovedAgentActionRequest,
+  ApprovedAgentActionResult,
+  JobListEntry,
+  LaunchdJob,
+  PlistConfig,
+} from "@/types"
 
 export const listJobs = () => invoke<JobListEntry[]>("list_jobs")
 
@@ -18,11 +28,11 @@ export const restartJob = (plistPath: string) =>
 export const kickstartJob = (label: string, plistPath: string) =>
   invoke<void>("kickstart_job", { label, plistPath })
 
-export const enableJob = (label: string) =>
-  invoke<void>("enable_job", { label })
+export const enableJob = (label: string, plistPath: string) =>
+  invoke<void>("enable_job", { label, plistPath })
 
-export const disableJob = (label: string) =>
-  invoke<void>("disable_job", { label })
+export const disableJob = (label: string, plistPath: string) =>
+  invoke<void>("disable_job", { label, plistPath })
 
 export const saveJob = (plistPath: string, config: PlistConfig) =>
   invoke<void>("save_job", { plistPath, config })
@@ -51,3 +61,18 @@ export const getHomeDir = () => invoke<string>("get_home_dir")
 
 export const revealInFinder = (path: string) =>
   invoke<void>("reveal_in_finder", { path })
+
+export const getAgentRuntimeSettings = () =>
+  invoke<AgentRuntimeSettings>("get_agent_runtime_settings")
+
+export const saveAgentRuntimeSettings = (settings: AgentRuntimeSettings) =>
+  invoke<AgentRuntimeSettings>("save_agent_runtime_settings", { settings })
+
+export const getAgentRuntimeSummary = () =>
+  invoke<AgentRuntimeSummary>("get_agent_runtime_summary")
+
+export const runAgentPrompt = (request: AgentPromptRequest) =>
+  invoke<AgentRuntimeResult>("run_agent_prompt", { request })
+
+export const applyApprovedAgentAction = (request: ApprovedAgentActionRequest) =>
+  invoke<ApprovedAgentActionResult>("apply_approved_agent_action", { request })

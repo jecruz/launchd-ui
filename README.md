@@ -1,23 +1,70 @@
-# launchd-ui
+# Launch Control
 
-A GUI application for managing macOS launchd agents and daemons. Built with Tauri v2.
+A tray-first macOS GUI for inspecting and controlling `launchd` jobs. Built with Tauri v2, React, TypeScript, and Rust.
 
-Browse user LaunchAgents (`~/Library/LaunchAgents/`) and system agents/daemons. Start, stop, restart, view/edit plist files, and create new agents.
+Launch Control focuses on fast menu bar access, safe user-agent control, and local agent assistance. The embedded assistant can summarize jobs, propose fixes, and draft launchctl actions, but model output is never executed as shell text.
 
 ![screenshot](screenshot.jpg)
 
 ## Features
 
+- Menu bar app with tray actions for show, hide, refresh, and quit
 - List User Agents (`~/Library/LaunchAgents/`), System Agents, and System Daemons
 - Search by label and filter by source (User / System / Daemon)
-- Start / Stop / Restart / Test Run (immediate execution) for User Agents
+- Start / Stop / Restart / Kickstart / Enable / Disable for User Agents
 - Create new agents, edit and delete existing ones
 - Schedule configuration (interval / calendar) with next run time preview
 - View stdout / stderr logs
 - Inspect plist configuration details
 - Reveal plist file in Finder
+- Local model routing through Ollama, llama.cpp/yama.cpp-compatible CLIs, or a custom local CLI
+- Approval timeline for model-proposed launchctl actions
+- Runtime readiness checks and a smoke test before using job context
+- Proactive local job insights before prompting
+- In-session assistant conversation history
+- Semi-autonomous mode for safe user-agent start/kickstart proposals
 
-System Agents and Daemons are read-only. Modification operations are limited to User Agents.
+System Agents and Daemons are read-only. Modification operations are limited to User Agents under `~/Library/LaunchAgents`.
+
+## Agent Workflow
+
+The agent panel is local-first and approval-gated:
+
+- `Summarize`: explains the selected job and current state.
+- `Plan fix`: proposes a remediation plan without applying changes.
+- `Propose command`: asks the local model for a structured launchctl proposal.
+- `Approval gate`: requires explicit user confirmation.
+- `Apply action`: converts supported proposals into deterministic Rust commands.
+- `Verification`: refreshes the job detail and shows the post-apply state.
+
+Supported approved actions are classified into known operations only: start, stop, restart, kickstart, enable, and disable. Ambiguous or unsupported model proposals are rejected.
+
+## Runtime Providers
+
+Configure the local assistant from the agent panel:
+
+- `Ollama`: runs `ollama run <model>`.
+- `llama.cpp / yama.cpp`: runs a local executable with model and prompt flags.
+- `Custom local CLI`: supports stdin or prompt-argument mode.
+
+The control surface shows readiness checks for executable, model, host, and prompt mode. Prompt execution stays disabled until the selected provider is complete. Use `Smoke Test Runtime` to verify the local runtime before sending job context.
+
+## Assistant Modes
+
+The assistant keeps an in-session history of recent local model turns, including prompt, response, structured summary, and command proposal status. It also surfaces proactive local signals, such as read-only system ownership, non-zero exit codes, disabled jobs, KeepAlive mismatch, and stderr paths.
+
+Semi-autonomous mode is deliberately conservative. When enabled, only safe user-agent start or kickstart-style proposals can auto-apply. Stop, restart, bootout, disable, ambiguous proposals, and system-owned jobs remain locked behind manual review.
+
+## Safety Notes
+
+- Arbitrary model-generated shell commands are never executed.
+- System agents and daemons stay read-only in the UI and backend.
+- User-agent mutations require a `~/Library/LaunchAgents/*.plist` path.
+- Semi-autonomous execution is opt-in and limited to safe user-agent start/kickstart proposals.
+- Enable and disable use `launchctl bootstrap` and `launchctl bootout` with the actual plist path.
+- Start, stop, restart, and kickstart use the current `gui/<uid>/<label>` target.
+- Approved actions return the exact display command plus verified post-action status.
+- The audit trail retains prompt, job context, structured result, raw response, and runtime command line.
 
 ## Install
 
@@ -61,13 +108,14 @@ pnpm tauri:build
 ## Testing / Lint
 
 ```bash
-pnpm test          # vitest (frontend)
-pnpm lint          # oxlint
-pnpm typecheck     # TypeScript type check
+pnpm typecheck
+pnpm build
+pnpm test
+pnpm lint
 
-cargo test --manifest-path src-tauri/Cargo.toml          # Rust tests
-cargo fmt --manifest-path src-tauri/Cargo.toml --check   # Rust format check
-cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings  # Rust lint
+RUSTUP_HOME=$HOME/.rustup cargo test --manifest-path src-tauri/Cargo.toml
+RUSTUP_HOME=$HOME/.rustup cargo fmt --manifest-path src-tauri/Cargo.toml --check
+RUSTUP_HOME=$HOME/.rustup cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 ```
 
 ## License
