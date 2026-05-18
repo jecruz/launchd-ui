@@ -32,6 +32,12 @@ function installProposalHandlers(job: JobListEntry) {
   }))
 }
 
+function approvalCheckbox() {
+  return screen.getByRole("checkbox", {
+    name: /I reviewed the proposed action and approve a local user-agent mutation/i,
+  })
+}
+
 describe("AgentPanel timeline", () => {
   afterEach(() => {
     resetFakeHandlers()
@@ -55,16 +61,16 @@ describe("AgentPanel timeline", () => {
 
     await screen.findByText("0/5 stages complete")
     await user.click(screen.getByText("Propose command").closest("button")!)
-    await user.click(screen.getByRole("checkbox"))
+    await user.click(approvalCheckbox())
     const runButton = screen.getByRole("button", { name: "Run Prompt" })
     await waitFor(() => expect(runButton).not.toBeDisabled())
     await user.click(runButton)
 
-    await waitFor(() => expect(screen.getAllByText("Kickstart the selected job.")).toHaveLength(2))
+    await waitFor(() => expect(screen.getAllByText("Kickstart the selected job.").length).toBeGreaterThanOrEqual(2))
     expect(screen.getAllByText("Preview").length).toBeGreaterThan(0)
     expect(screen.getAllByText("Needs approval").length).toBeGreaterThan(0)
 
-    await user.click(screen.getByRole("checkbox"))
+    await user.click(approvalCheckbox())
     await user.click(screen.getByRole("button", { name: "Apply Approved Action" }))
 
     await waitFor(() => expect(onApplied).toHaveBeenCalledTimes(1))
@@ -99,12 +105,12 @@ describe("AgentPanel timeline", () => {
 
     await screen.findByText("0/5 stages complete")
     await user.click(screen.getByText("Propose command").closest("button")!)
-    await user.click(screen.getByRole("checkbox"))
+    await user.click(approvalCheckbox())
     const runButton = screen.getByRole("button", { name: "Run Prompt" })
     await waitFor(() => expect(runButton).not.toBeDisabled())
     await user.click(runButton)
 
-    await waitFor(() => expect(screen.getAllByText("Kickstart the selected job.")).toHaveLength(2))
+    await waitFor(() => expect(screen.getAllByText("Kickstart the selected job.").length).toBeGreaterThanOrEqual(2))
 
     expect(screen.getByText("Read-only")).toBeInTheDocument()
     expect(
@@ -159,5 +165,51 @@ describe("AgentPanel timeline", () => {
         mode: "smoke",
       },
     })
+  })
+
+  it("records assistant turns in conversation history with proactive insights", async () => {
+    const user = userEvent.setup()
+
+    installProposalHandlers(selectedJob)
+
+    render(<AgentPanel mode="approval" selectedJob={selectedJob} onApplied={vi.fn()} />)
+
+    expect(await screen.findByText("Proactive insights")).toBeInTheDocument()
+    expect(screen.getByText("Local job signals before prompting")).toBeInTheDocument()
+    await user.click(screen.getByText("Propose command").closest("button")!)
+    await user.click(approvalCheckbox())
+    await user.click(screen.getByRole("button", { name: "Run Prompt" }))
+
+    await screen.findByText("Conversation history")
+    expect(screen.getByText("Last local assistant turns")).toBeInTheDocument()
+    expect(screen.getByText("Command proposed")).toBeInTheDocument()
+  })
+
+  it("auto-applies safe user-agent proposals when semi-autonomous mode is enabled", async () => {
+    const user = userEvent.setup()
+    const onApplied = vi.fn()
+    const applyApprovedAgentAction = vi.fn(() => ({
+      action: "Kickstart",
+      command: "launchctl kickstart -k gui/501/com.example.running-agent",
+      verified_status: "Running",
+      verified_pid: 789,
+      verified_last_exit_code: 0,
+    }))
+
+    installProposalHandlers(selectedJob)
+    setFakeHandler("apply_approved_agent_action", applyApprovedAgentAction)
+
+    render(<AgentPanel mode="approval" selectedJob={selectedJob} onApplied={onApplied} />)
+
+    await screen.findByText("0/5 stages complete")
+    await user.click(screen.getByRole("checkbox", { name: /Semi-autonomous mode/i }))
+    await user.click(screen.getByText("Propose command").closest("button")!)
+    const runButton = screen.getByRole("button", { name: "Run Prompt" })
+    await waitFor(() => expect(runButton).not.toBeDisabled())
+    await user.click(runButton)
+
+    await waitFor(() => expect(applyApprovedAgentAction).toHaveBeenCalledTimes(1))
+    expect(onApplied).toHaveBeenCalledTimes(1)
+    expect(screen.getByText("789")).toBeInTheDocument()
   })
 })

@@ -47,6 +47,15 @@ type TimelineStep = {
   body: ReactNode
 }
 
+type ConversationEntry = {
+  id: string
+  action: AgentAction
+  prompt: string
+  summary: string
+  response: string
+  commandProposal: string | null
+}
+
 const providerOptions: Array<{ value: AgentRuntimeProvider; label: string }> = [
   { value: "LlamaCpp", label: "llama.cpp / yama.cpp" },
   { value: "Ollama", label: "Ollama" },
@@ -192,6 +201,47 @@ function inferActionPreview(
   }
 }
 
+function buildProactiveInsights(job: JobListEntry | null, detail: LaunchdJob | null): string[] {
+  if (!job) return ["Select a launchd job to generate local insights."]
+
+  const insights: string[] = []
+  const lastExitCode = detail?.last_exit_code ?? job.last_exit_code
+  const status = detail?.status ?? job.status
+  const plist = detail?.plist
+
+  if (job.source !== "UserAgent") {
+    insights.push("System-owned job: inspect only; keep mutation controls locked.")
+  }
+  if (lastExitCode !== null && lastExitCode !== 0) {
+    insights.push(`Last exit code is ${lastExitCode}; inspect stderr before restarting.`)
+  }
+  if (status === "Running" && (detail?.pid ?? job.pid)) {
+    insights.push(`Running with PID ${detail?.pid ?? job.pid}; prefer logs before forcing a restart.`)
+  }
+  if (status === "Unloaded") {
+    insights.push("Unloaded: bootstrap or enable may be needed if this should run now.")
+  }
+  if (plist?.disabled === true) {
+    insights.push("Disabled in plist metadata; enable before expecting launchd to run it.")
+  }
+  if (plist?.keep_alive === true && status !== "Running") {
+    insights.push("KeepAlive is set but the job is not running; check crash loops and permissions.")
+  }
+  if (plist?.standard_error_path) {
+    insights.push(`stderr is configured at ${plist.standard_error_path}.`)
+  }
+
+  return insights.length ? insights : ["No obvious risk flags from the current job snapshot."]
+}
+
+function isSafeAutoApplyProposal(job: JobListEntry | null, result: StructuredAgentResult | null): boolean {
+  if (!job || job.source !== "UserAgent" || !result?.command_proposal) return false
+  const command = result.command_proposal.toLowerCase()
+  const sensitive = ["bootout", "disable", "stop", "restart"].some((term) => command.includes(term))
+  const safeStart = command.includes("kickstart") || command.includes("bootstrap") || command.includes(" start")
+  return safeStart && !sensitive
+}
+
 export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
   const [settings, setSettings] = useState<AgentRuntimeSettings | null>(null)
   const [prompt, setPrompt] = useState("")
@@ -209,8 +259,14 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
   const [approvalConfirmed, setApprovalConfirmed] = useState(false)
   const [structuredResult, setStructuredResult] = useState<StructuredAgentResult | null>(null)
   const [appliedAction, setAppliedAction] = useState<string | null>(null)
+  const [autoApplySafeActions, setAutoApplySafeActions] = useState(false)
+  const [conversation, setConversation] = useState<ConversationEntry[]>([])
 
   const jobContext = useMemo(() => buildJobContext(selectedJob), [selectedJob])
+  const proactiveInsights = useMemo(
+    () => buildProactiveInsights(selectedJob, jobDetail),
+    [jobDetail, selectedJob]
+  )
 
   useEffect(() => {
     Promise.all([getAgentRuntimeSettings(), getAgentRuntimeSummary()])
@@ -267,23 +323,22 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
     [selectedJob, structuredResult]
   )
 
-  const handleApplyApprovedAction = async () => {
+  const applyStructuredAction = async (proposal: StructuredAgentResult) => {
     if (!selectedJob || selectedJob.source !== "UserAgent") {
       setError("Only user agents can be mutated from the approved action path.")
       return
     }
-    if (!structuredResult?.command_proposal) {
+    if (!proposal.command_proposal) {
       setError("No command proposal is available to apply.")
       return
     }
-    setRunning(true)
     setError(null)
     setAppliedAction(null)
     try {
       const result = await applyApprovedAgentAction({
         plist_path: selectedJob.plist_path,
         label: selectedJob.label,
-        command_proposal: structuredResult.command_proposal,
+        command_proposal: proposal.command_proposal,
       })
       setAppliedAction(`${result.action}: ${result.command}`)
       setVerificationDetail({
@@ -315,6 +370,15 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
       await onApplied?.()
     } catch (e) {
       setError(String(e))
+      throw e
+    }
+  }
+
+  const handleApplyApprovedAction = async () => {
+    if (!structuredResult) return
+    setRunning(true)
+    try {
+      await applyStructuredAction(structuredResult)
     } finally {
       setRunning(false)
     }
@@ -574,10 +638,26 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
         job_context: buildDetailedJobContext(jobDetail) ?? jobContext,
         mode,
       })
+      const parsed = extractJsonObject(result.response)
       setResponse(result.response || "(no output)")
       setCommandLine(result.command_line)
-      setStructuredResult(extractJsonObject(result.response))
+      setStructuredResult(parsed)
+      setConversation((current) => [
+        {
+          id: `${Date.now()}-${current.length}`,
+          action: activeAction,
+          prompt,
+          summary: parsed?.summary ?? "Unstructured response",
+          response: result.response || "(no output)",
+          commandProposal: parsed?.command_proposal ?? null,
+        },
+        ...current,
+      ].slice(0, 8))
       setApprovalConfirmed(false)
+      if (parsed && autoApplySafeActions && isSafeAutoApplyProposal(selectedJob, parsed)) {
+        setApprovalConfirmed(true)
+        await applyStructuredAction(parsed)
+      }
     } catch (e) {
       setError(String(e))
     } finally {
@@ -670,6 +750,29 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
       )}
 
       <div className="mt-4 grid gap-4">
+        <div className="rounded-3xl border border-sky-400/15 bg-sky-400/10 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-xs uppercase tracking-[0.24em] text-sky-100/70">
+                Proactive insights
+              </p>
+              <h4 className="mt-1 text-base font-semibold text-white">
+                Local job signals before prompting
+              </h4>
+            </div>
+            <Badge className="border-sky-300/20 bg-sky-300/10 text-sky-50 hover:bg-sky-300/10">
+              {proactiveInsights.length} signals
+            </Badge>
+          </div>
+          <ul className="mt-3 grid gap-2 text-sm text-sky-50/90">
+            {proactiveInsights.map((insight) => (
+              <li key={insight} className="rounded-xl border border-white/10 bg-black/15 p-2">
+                {insight}
+              </li>
+            ))}
+          </ul>
+        </div>
+
         <div className="grid gap-2 md:grid-cols-3">
           {(
             [
@@ -885,6 +988,18 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
           </>
         )}
 
+        <label className="flex items-start gap-3 rounded-2xl border border-white/10 bg-white/5 p-3 text-sm text-slate-200">
+          <input
+            type="checkbox"
+            checked={autoApplySafeActions}
+            onChange={(e) => setAutoApplySafeActions(e.target.checked)}
+            className="mt-1 h-4 w-4 rounded border-white/20 bg-slate-950 text-cyan-500 focus:ring-cyan-400"
+          />
+          <span className="leading-6">
+            Semi-autonomous mode: auto-apply safe user-agent start or kickstart proposals. Stop, restart, disable, bootout, and system-owned jobs still require manual review.
+          </span>
+        </label>
+
         <div className="flex flex-wrap gap-2">
           <Button
             onClick={handleSave}
@@ -900,7 +1015,7 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
               running ||
               !settings ||
               !runtimeReady ||
-              (activeAction === "proposal" && !approvalConfirmed)
+              (activeAction === "proposal" && !approvalConfirmed && !autoApplySafeActions)
             }
             className="border-white/10 bg-white/5 text-slate-100 hover:bg-white/10"
           >
@@ -908,7 +1023,7 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
               ? "Running..."
               : !runtimeReady
                 ? "Configure runtime"
-              : activeAction === "proposal" && !approvalConfirmed
+              : activeAction === "proposal" && !approvalConfirmed && !autoApplySafeActions
                 ? "Approve to run"
                 : "Run Prompt"}
           </Button>
@@ -1095,6 +1210,52 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
         {error && (
           <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
             {error}
+          </div>
+        )}
+
+        {conversation.length > 0 && (
+          <div className="rounded-3xl border border-white/10 bg-white/5 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+                  Conversation history
+                </p>
+                <h4 className="mt-1 text-base font-semibold text-white">
+                  Last local assistant turns
+                </h4>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setConversation([])}
+                className="border-white/10 bg-white/5 text-slate-100 hover:bg-white/10"
+              >
+                Clear History
+              </Button>
+            </div>
+            <div className="mt-3 grid gap-2">
+              {conversation.map((entry) => (
+                <div key={entry.id} className="rounded-2xl border border-white/10 bg-black/15 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs uppercase tracking-[0.22em] text-cyan-100/70">
+                      {entry.action}
+                    </span>
+                    {entry.commandProposal && (
+                      <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-amber-50">
+                        Command proposed
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-2 text-sm font-medium text-white">{entry.summary}</p>
+                  <details className="mt-2 text-xs text-slate-300">
+                    <summary className="cursor-pointer text-cyan-200">Show prompt and response</summary>
+                    <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-white/10 bg-slate-950/70 p-3 font-mono leading-5">
+                      {`Prompt:\n${entry.prompt}\n\nResponse:\n${entry.response}`}
+                    </pre>
+                  </details>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 

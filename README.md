@@ -20,6 +20,9 @@ Launch Control focuses on fast menu bar access, safe user-agent control, and loc
 - Local model routing through Ollama, llama.cpp/yama.cpp-compatible CLIs, or a custom local CLI
 - Approval timeline for model-proposed launchctl actions
 - Runtime readiness checks and a smoke test before using job context
+- Proactive local job insights before prompting
+- In-session assistant conversation history
+- Semi-autonomous mode for safe user-agent start/kickstart proposals
 
 System Agents and Daemons are read-only. Modification operations are limited to User Agents under `~/Library/LaunchAgents`.
 
@@ -46,11 +49,18 @@ Configure the local assistant from the agent panel:
 
 The control surface shows readiness checks for executable, model, host, and prompt mode. Prompt execution stays disabled until the selected provider is complete. Use `Smoke Test Runtime` to verify the local runtime before sending job context.
 
+## Assistant Modes
+
+The assistant keeps an in-session history of recent local model turns, including prompt, response, structured summary, and command proposal status. It also surfaces proactive local signals, such as read-only system ownership, non-zero exit codes, disabled jobs, KeepAlive mismatch, and stderr paths.
+
+Semi-autonomous mode is deliberately conservative. When enabled, only safe user-agent start or kickstart-style proposals can auto-apply. Stop, restart, bootout, disable, ambiguous proposals, and system-owned jobs remain locked behind manual review.
+
 ## Safety Notes
 
 - Arbitrary model-generated shell commands are never executed.
 - System agents and daemons stay read-only in the UI and backend.
 - User-agent mutations require a `~/Library/LaunchAgents/*.plist` path.
+- Semi-autonomous execution is opt-in and limited to safe user-agent start/kickstart proposals.
 - Enable and disable use `launchctl bootstrap` and `launchctl bootout` with the actual plist path.
 - Start, stop, restart, and kickstart use the current `gui/<uid>/<label>` target.
 - Approved actions return the exact display command plus verified post-action status.

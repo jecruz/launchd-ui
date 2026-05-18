@@ -70,6 +70,20 @@ Success criterion: zero BLOCKER findings before commit.
 
 Success criterion: typecheck, build, tests, lint, Rust tests, format check, and clippy pass.
 
+## Milestone 6: Continue Assistant And Policy Scope
+
+### Task 6.1: Add in-session assistant conversation history — DONE
+
+Success criterion: recent assistant turns show action, summary, prompt/response, and command proposal state.
+
+### Task 6.2: Add proactive job insights — DONE
+
+Success criterion: the panel surfaces local status/plist signals before prompting the model.
+
+### Task 6.3: Add conservative semi-autonomous execution policy — DONE
+
+Success criterion: opt-in auto-apply only runs safe user-agent start/kickstart-style proposals while preserving manual review for sensitive/system actions.
+
 ## Approval Gate
 
 FUBAR requires human approval before implementation continues past this roadmap.
