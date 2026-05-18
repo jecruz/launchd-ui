@@ -1,4 +1,5 @@
 import type { JobListEntry, LaunchdJob, PlistConfig } from "@/types"
+import type { AgentRuntimeSettings } from "@/types"
 
 const defaultPlistConfig: PlistConfig = {
   label: "",
@@ -95,6 +96,46 @@ const handlers: Record<string, CommandHandler> = {
   }),
   open_log_in_editor: () => undefined,
   reveal_in_finder: () => undefined,
+  get_agent_runtime_settings: () =>
+    ({
+      provider: "Ollama",
+      system_prompt: "You are Launch Control.",
+      llama_cpp_executable_path: "",
+      llama_cpp_model_path: "",
+      llama_cpp_prompt_flag: "-p",
+      llama_cpp_model_flag: "-m",
+      llama_cpp_extra_args: "--ctx-size 4096",
+      ollama_executable_path: "ollama",
+      ollama_model: "llama3.2:1b",
+      ollama_host: "http://127.0.0.1:11434",
+      local_cli_executable_path: "",
+      local_cli_args_template: "",
+      local_cli_prompt_mode: "Stdin",
+      local_cli_prompt_argument: "--prompt",
+    } as AgentRuntimeSettings),
+  get_agent_runtime_summary: () => ({
+    provider: "Ollama",
+    provider_label: "Ollama",
+    configured: true,
+    details: ["ollama", "model: llama3.2:1b"],
+    readiness_checks: [
+      { label: "Executable", status: "ready", detail: "ollama" },
+      { label: "Model", status: "ready", detail: "llama3.2:1b" },
+      { label: "Host", status: "ready", detail: "default local Ollama host" },
+    ],
+  }),
+  save_agent_runtime_settings: (args) => args.settings,
+  run_agent_prompt: (args) => ({
+    response: `Mock response for ${args.mode}`,
+    command_line: "mock-runner --prompt",
+  }),
+  apply_approved_agent_action: () => ({
+    action: "Kickstart",
+    command: "launchctl kickstart -k gui/501/com.example.test",
+    verified_status: "Running",
+    verified_pid: 123,
+    verified_last_exit_code: 0,
+  }),
 }
 
 let customHandlers: Record<string, CommandHandler> = {}

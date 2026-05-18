@@ -5,6 +5,9 @@ pub enum AppError {
     #[error("launchctl error: {0}")]
     Launchctl(String),
 
+    #[error("agent runtime error: {0}")]
+    AgentRuntime(String),
+
     #[error("plist error: {0}")]
     Plist(String),
 
