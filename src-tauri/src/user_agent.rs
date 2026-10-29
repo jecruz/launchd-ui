@@ -1,8 +1,12 @@
 use crate::error::AppError;
 use crate::plist_util;
 use crate::types::PlistConfig;
-use std::io::Read;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::ffi::CString;
+use std::fs::{File, Metadata};
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 fn rejected() -> AppError {
@@ -37,6 +41,7 @@ fn path_in(root: &Path, path: &Path, must_exist: bool) -> Result<PathBuf, AppErr
     let root_metadata = std::fs::symlink_metadata(root)?;
     if !root_metadata.is_dir()
         || root_metadata.file_type().is_symlink()
+        || root_metadata.uid() != unsafe { libc::geteuid() }
         || std::fs::symlink_metadata(root.parent().ok_or_else(rejected)?)?
             .file_type()
             .is_symlink()
@@ -71,6 +76,7 @@ fn path_in(root: &Path, path: &Path, must_exist: bool) -> Result<PathBuf, AppErr
 }
 
 /// Validate a direct child of the user's LaunchAgents directory before mutation.
+#[cfg(test)]
 pub fn path(path: &str, must_exist: bool) -> Result<PathBuf, AppError> {
     path_in(
         &plist_util::get_user_agents_dir(),
@@ -79,22 +85,151 @@ pub fn path(path: &str, must_exist: bool) -> Result<PathBuf, AppError> {
     )
 }
 
-fn load_in(
-    root: &Path,
-    path: &Path,
-    label: Option<&str>,
-) -> Result<(String, PlistConfig), AppError> {
+fn open_at(directory: &File, name: &CString, flags: i32) -> Result<File, AppError> {
+    // SAFETY: the directory and NUL-terminated name live for the call; the returned
+    // descriptor is uniquely owned by File, and never follows a final symlink.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600 as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+fn system_path(path: &Path) -> Result<PathBuf, AppError> {
+    // macOS exposes these root-owned platform aliases; other symlink components
+    // remain forbidden. Never canonicalize an arbitrary caller-selected path.
+    for (alias, destination) in [("/var", "/private/var"), ("/tmp", "/private/tmp")] {
+        if let Ok(tail) = path.strip_prefix(alias) {
+            let metadata = std::fs::symlink_metadata(alias)?;
+            if metadata.file_type().is_symlink() {
+                let target = std::fs::read_link(alias)?;
+                let target = if target.is_absolute() {
+                    target
+                } else {
+                    Path::new("/").join(target)
+                };
+                if metadata.uid() != 0 || target != Path::new(destination) {
+                    return Err(rejected());
+                }
+                return Ok(Path::new(destination).join(tail));
+            }
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
+fn open_directory(path: &Path) -> Result<File, AppError> {
+    let path = system_path(path)?;
+    if !path.is_absolute() {
+        return Err(rejected());
+    }
+    let mut directory = File::open("/")?;
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                let name = CString::new(name.as_bytes()).map_err(|_| rejected())?;
+                directory = open_at(&directory, &name, libc::O_RDONLY | libc::O_DIRECTORY)?;
+            }
+            _ => return Err(rejected()),
+        }
+    }
+    Ok(directory)
+}
+
+fn same_file(a: &Metadata, b: &Metadata) -> bool {
+    a.dev() == b.dev()
+        && a.ino() == b.ino()
+        && b.is_file()
+        && b.nlink() == 1
+        && a.uid() == b.uid()
+        && a.len() == b.len()
+        && a.mtime() == b.mtime()
+        && a.mtime_nsec() == b.mtime_nsec()
+        && a.ctime() == b.ctime()
+        && a.ctime_nsec() == b.ctime_nsec()
+}
+
+/// A validated plist bound to an open directory and its original file identity.
+pub struct CheckedAgent {
+    path: PathBuf,
+    directory: File,
+    name: CString,
+    identity: Metadata,
+    // Keep the validated inode alive so it cannot be recycled after replacement.
+    _file: File,
+    /// Configuration read from the validated file descriptor.
+    pub config: PlistConfig,
+}
+
+impl CheckedAgent {
+    /// Return the canonical pathname required by launchctl and sidecar keys.
+    pub fn path(&self) -> String {
+        self.path.to_string_lossy().into_owned()
+    }
+
+    /// Reject replacement or edits immediately before a pathname-based operation.
+    pub fn ensure_current(&self) -> Result<(), AppError> {
+        let parent = open_directory(self.path.parent().ok_or_else(rejected)?)?.metadata()?;
+        let directory = self.directory.metadata()?;
+        if parent.file_type().is_symlink()
+            || parent.dev() != directory.dev()
+            || parent.ino() != directory.ino()
+        {
+            return Err(rejected());
+        }
+        let current = open_at(&self.directory, &self.name, libc::O_RDONLY)?;
+        if !same_file(&self.identity, &current.metadata()?) {
+            return Err(rejected());
+        }
+        Ok(())
+    }
+
+    /// Replace bytes through a descriptor matching the originally validated inode.
+    pub fn write(&self, bytes: &[u8]) -> Result<(), AppError> {
+        self.ensure_current()?;
+        let mut file = open_at(&self.directory, &self.name, libc::O_WRONLY)?;
+        if !same_file(&self.identity, &file.metadata()?) {
+            return Err(rejected());
+        }
+        file.set_len(0)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    /// Unlink a checked entry relative to the validated directory descriptor.
+    pub fn remove(&self) -> Result<(), AppError> {
+        self.ensure_current()?;
+        // SAFETY: the directory and filename remain valid; unlinkat cannot escape
+        // this directory because the checked name is a single path component.
+        if unsafe { libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+}
+
+fn load_in(root: &Path, path: &Path, label: Option<&str>) -> Result<CheckedAgent, AppError> {
     let path = path_in(root, path, true)?;
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != root.metadata()?.uid() {
+    let directory = open_directory(path.parent().ok_or_else(rejected)?)?;
+    let name =
+        CString::new(path.file_name().ok_or_else(rejected)?.as_bytes()).map_err(|_| rejected())?;
+    let mut file = open_at(&directory, &name, libc::O_RDONLY)?;
+    let identity = file.metadata()?;
+    if !identity.is_file() || identity.nlink() != 1 || identity.uid() != directory.metadata()?.uid()
+    {
         return Err(rejected());
     }
     let mut bytes = Vec::new();
-    file.by_ref()
+    Read::by_ref(&mut file)
         .take(1024 * 1024 + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() > 1024 * 1024 {
@@ -107,12 +242,102 @@ fn load_in(
     {
         return Err(rejected());
     }
-    Ok((path.to_str().ok_or_else(rejected)?.to_string(), config))
+    let agent = CheckedAgent {
+        path,
+        directory,
+        name,
+        identity,
+        _file: file,
+        config,
+    };
+    agent.ensure_current()?;
+    Ok(agent)
 }
 
-/// Load a validated user agent and bind any caller-supplied label to its plist.
-pub fn load(path: &str, label: Option<&str>) -> Result<(String, PlistConfig), AppError> {
+/// Load a user agent and retain its descriptor-bound identity until mutation.
+pub fn load(path: &str, label: Option<&str>) -> Result<CheckedAgent, AppError> {
     load_in(&plist_util::get_user_agents_dir(), Path::new(path), label)
+}
+
+/// Create a new safe entry relative to its validated LaunchAgents directory.
+pub fn create(label: &str, bytes: &[u8]) -> Result<String, AppError> {
+    create_in(&plist_util::get_user_agents_dir(), label, bytes)
+}
+
+fn create_in(root: &Path, label: &str, bytes: &[u8]) -> Result<String, AppError> {
+    validate_label(label)?;
+    if plist_util::parse_plist_bytes(bytes)?.label != label {
+        return Err(rejected());
+    }
+    let parent = open_directory(root.parent().ok_or_else(rejected)?)?;
+    let root_name =
+        CString::new(root.file_name().ok_or_else(rejected)?.as_bytes()).map_err(|_| rejected())?;
+    // SAFETY: a single-component name creates only an entry in the already-open
+    // Library directory; no caller-controlled symlink can redirect mkdirat.
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), root_name.as_ptr(), 0o700) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(error.into());
+        }
+    }
+    let path = path_in(root, &root.join(format!("{label}.plist")), false)?;
+    let directory = open_directory(path.parent().ok_or_else(rejected)?)?;
+    let name =
+        CString::new(path.file_name().ok_or_else(rejected)?.as_bytes()).map_err(|_| rejected())?;
+    let mut file = open_at(
+        &directory,
+        &name,
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+    )?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    directory.sync_all()?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Require log destinations to have an existing real directory parent.
+pub fn validate_log_parents(config: &PlistConfig) -> Result<(), AppError> {
+    for path in [&config.standard_out_path, &config.standard_error_path]
+        .into_iter()
+        .flatten()
+    {
+        let path = Path::new(path);
+        if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
+            return Err(rejected());
+        }
+        let parent = system_path(path.parent().ok_or_else(rejected)?)?;
+        // canonical equality rejects non-platform symlinks in any parent component.
+        if !parent.is_dir() || parent.canonicalize()? != parent {
+            return Err(rejected());
+        }
+        if let Ok(metadata) = std::fs::symlink_metadata(path) {
+            if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.nlink() != 1 {
+                return Err(rejected());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Open only a declared owned regular log through non-symlink directory descriptors.
+pub fn open_log_for_clear(path: &str, config: &PlistConfig) -> Result<File, AppError> {
+    if ![&config.standard_out_path, &config.standard_error_path]
+        .iter()
+        .any(|candidate| candidate.as_deref() == Some(path))
+    {
+        return Err(rejected());
+    }
+    let path = Path::new(path);
+    let directory = open_directory(path.parent().ok_or_else(rejected)?)?;
+    let name =
+        CString::new(path.file_name().ok_or_else(rejected)?.as_bytes()).map_err(|_| rejected())?;
+    let file = open_at(&directory, &name, libc::O_WRONLY)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != unsafe { libc::geteuid() }
+    {
+        return Err(rejected());
+    }
+    Ok(file)
 }
 
 /// Require raw XML edits to retain the existing plist's explicit label.
@@ -133,6 +358,72 @@ mod tests {
         let path = root.join(filename);
         std::fs::write(&path, format!("<plist version=\"1.0\"><dict><key>Label</key><string>{label}</string></dict></plist>")).unwrap();
         path
+    }
+
+    #[test]
+    fn creation_is_exclusive_and_rejects_a_linked_parent_before_mkdir() {
+        let base = tempfile::tempdir().unwrap();
+        let library = base.path().join("Library");
+        std::fs::create_dir(&library).unwrap();
+        let root = library.join("LaunchAgents");
+        let bytes = b"<plist><dict><key>Label</key><string>safe</string></dict></plist>";
+        let path = create_in(&root, "safe", bytes).unwrap();
+        assert!(create_in(&root, "safe", bytes).is_err());
+        assert!(create_in(&root, "other", bytes).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let outside = base.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::rename(&library, base.path().join("saved-library")).unwrap();
+        symlink(&outside, &library).unwrap();
+        assert!(create_in(&root, "safe", bytes).is_err());
+        assert!(!outside.join("LaunchAgents").exists());
+    }
+
+    #[test]
+    fn rejects_replaced_files_before_writing_or_removing() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "safe.plist", "safe");
+        let agent = load_in(root.path(), &path, None).unwrap();
+        let replacement = fixture(root.path(), "replacement.plist", "safe");
+        std::fs::rename(replacement, &path).unwrap();
+        assert!(agent.ensure_current().is_err());
+        assert!(agent.write(b"wrong").is_err());
+        assert!(agent.remove().is_err());
+        assert_eq!(
+            load_in(root.path(), &path, None).unwrap().config.label,
+            "safe"
+        );
+    }
+
+    #[test]
+    fn requires_existing_nonlinked_log_parents() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "safe.plist", "safe");
+        let mut config = load_in(root.path(), &path, None).unwrap().config;
+        config.standard_out_path = Some(
+            root.path()
+                .join("missing/out.log")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        assert!(validate_log_parents(&config).is_err());
+        symlink(root.path(), root.path().join("alias")).unwrap();
+        config.standard_out_path = Some(
+            root.path()
+                .join("alias/out.log")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        assert!(validate_log_parents(&config).is_err());
+        config.standard_out_path = Some(
+            root.path()
+                .canonicalize()
+                .unwrap()
+                .join("out.log")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        assert!(validate_log_parents(&config).is_ok());
     }
 
     #[test]

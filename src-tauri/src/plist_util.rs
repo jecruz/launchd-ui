@@ -3,7 +3,9 @@ use crate::types::{CalendarInterval, JobSource, LaunchControlMetadata, PlistConf
 use plist::Value;
 use std::collections::HashMap;
 use std::io::Cursor;
+#[cfg(test)]
 use std::io::Write;
+#[cfg(test)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
 
@@ -388,11 +390,13 @@ pub fn serialize_plist(config: &PlistConfig) -> Result<Vec<u8>, AppError> {
 }
 
 /// Write a validated plist configuration to its destination.
+#[cfg(test)]
 pub fn write_plist(path: &str, config: &PlistConfig) -> Result<(), AppError> {
     write_existing_plist(path, &serialize_plist(config)?)?;
     Ok(())
 }
 
+#[cfg(test)]
 fn write_existing_plist(path: &str, bytes: &[u8]) -> Result<(), AppError> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -410,6 +414,7 @@ fn write_existing_plist(path: &str, bytes: &[u8]) -> Result<(), AppError> {
     Ok(())
 }
 
+#[cfg(test)]
 pub fn write_raw_plist(path: &str, xml: &str) -> Result<(), AppError> {
     // Validate by parsing
     Value::from_reader(Cursor::new(xml.as_bytes()))
@@ -421,6 +426,7 @@ pub fn write_raw_plist(path: &str, xml: &str) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(test)]
     use std::io::Write;
     use tempfile::NamedTempFile;
 

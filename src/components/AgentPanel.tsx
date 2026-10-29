@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { CopyableCodeBlock } from "@/components/CopyableBlock"
@@ -280,6 +280,11 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
   const [autoApplySafeActions, setAutoApplySafeActions] = useState(false)
   const [conversation, setConversation] = useState<ConversationEntry[]>([])
 
+  const currentSelection = useRef({ path: selectedJob?.plist_path, generation: 0 })
+  if (currentSelection.current.path !== selectedJob?.plist_path) {
+    currentSelection.current = { path: selectedJob?.plist_path, generation: currentSelection.current.generation + 1 }
+  }
+
   const jobContext = useMemo(() => buildJobContext(selectedJob), [selectedJob])
   const proactiveInsights = useMemo(
     () => buildProactiveInsights(selectedJob, jobDetail),
@@ -333,6 +338,7 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
     setVerificationDetail(null)
     setAppliedAction(null)
     setApprovalConfirmed(false)
+    setStructuredResult(null)
   }, [selectedJob?.plist_path])
 
   const provider = settings?.provider ?? "Ollama"
@@ -350,7 +356,7 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
       setError("No command proposal is available to apply.")
       return
     }
-    if (proposal.target !== selectedJob.label) {
+    if (proposal.target !== selectedJob.label || currentSelection.current.path !== selectedJob.plist_path) {
       setError("The proposal target no longer matches the selected job.")
       return
     }
@@ -673,6 +679,7 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
 
   const handleRun = async () => {
     if (!settings || !runtimeReady) return
+    const generation = currentSelection.current.generation
     setRunning(true)
     setError(null)
     setResponse("")
@@ -686,6 +693,7 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
         job_context: buildDetailedJobContext(jobDetail) ?? jobContext,
         mode,
       })
+      if (currentSelection.current.generation !== generation) return
       const parsed = extractJsonObject(result.response)
       setResponse(result.response || "(no output)")
       setCommandLine(result.command_line)

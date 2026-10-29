@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { act, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { AgentPanel } from "./AgentPanel"
@@ -235,6 +235,25 @@ describe("AgentPanel timeline", () => {
       expect(apply).not.toHaveBeenCalled()
     }
   )
+
+  it("discards a pending automatic proposal after selection changes", async () => {
+    const user = userEvent.setup()
+    const apply = vi.fn()
+    let finish!: (value: { response: string; command_line: string }) => void
+    const run = vi.fn(() => new Promise<{ response: string; command_line: string }>((resolve) => { finish = resolve }))
+    setFakeHandler("run_agent_prompt", run)
+    setFakeHandler("apply_approved_agent_action", apply)
+    const view = render(<AgentPanel mode="approval" selectedJob={selectedJob} onApplied={vi.fn()} />)
+    await screen.findByText("0/5 stages complete")
+    await user.click(screen.getByRole("checkbox", { name: /Semi-autonomous mode/i }))
+    await user.click(screen.getByText("Propose command").closest("button")!)
+    await user.click(screen.getByRole("button", { name: "Run Prompt" }))
+    await waitFor(() => expect(run).toHaveBeenCalledOnce())
+    view.rerender(<AgentPanel mode="approval" selectedJob={{ ...selectedJob, label: "other", plist_path: "/Users/test/Library/LaunchAgents/other.plist" }} onApplied={vi.fn()} />)
+    await act(async () => finish({ response: JSON.stringify({ mode: "approval", action: "proposal", target: selectedJob.label, summary: "Stale proposal", risks: [], recommended_next_step: "Apply", approval_required: true, command_proposal: `launchctl kickstart -k gui/501/${selectedJob.label}`, verification: [] }), command_line: "test" }))
+    expect(apply).not.toHaveBeenCalled()
+    expect(screen.queryByText("Stale proposal")).not.toBeInTheDocument()
+  })
 
   it("rejects an automatic proposal naming a different job", async () => {
     const user = userEvent.setup()

@@ -2,15 +2,8 @@ use crate::error::AppError;
 use std::process::Command;
 
 fn get_uid() -> u32 {
-    // Use getuid() via libc-free approach
-    let output = Command::new("id")
-        .arg("-u")
-        .output()
-        .expect("failed to get uid");
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<u32>()
-        .expect("failed to parse uid")
+    // Use the process UID directly; action targets must not depend on PATH lookup.
+    unsafe { libc::getuid() }
 }
 
 pub(crate) fn gui_target() -> String {
@@ -52,7 +45,7 @@ pub fn parse_list_output(output: &str) -> Vec<LoadedService> {
 }
 
 pub fn list_loaded() -> Result<Vec<LoadedService>, AppError> {
-    let output = Command::new("launchctl")
+    let output = Command::new("/bin/launchctl")
         .arg("list")
         .output()
         .map_err(|e| AppError::Launchctl(format!("failed to run launchctl list: {e}")))?;
@@ -69,7 +62,7 @@ pub fn list_loaded() -> Result<Vec<LoadedService>, AppError> {
 }
 
 pub fn bootstrap(plist_path: &str) -> Result<(), AppError> {
-    let output = Command::new("launchctl")
+    let output = Command::new("/bin/launchctl")
         .args(["bootstrap", &gui_target(), plist_path])
         .output()
         .map_err(|e| AppError::Launchctl(format!("failed to run launchctl bootstrap: {e}")))?;
@@ -93,7 +86,7 @@ pub fn bootstrap(plist_path: &str) -> Result<(), AppError> {
 }
 
 pub fn bootout(plist_path: &str) -> Result<(), AppError> {
-    let output = Command::new("launchctl")
+    let output = Command::new("/bin/launchctl")
         .args(["bootout", &gui_target(), plist_path])
         .output()
         .map_err(|e| AppError::Launchctl(format!("failed to run launchctl bootout: {e}")))?;
@@ -114,8 +107,23 @@ pub fn bootout(plist_path: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Start a loaded service without terminating an already-running instance.
+pub fn start_loaded(label: &str) -> Result<(), AppError> {
+    let output = Command::new("/bin/launchctl")
+        .args(["kickstart", &service_target(label)])
+        .output()
+        .map_err(|e| AppError::Launchctl(format!("failed to start loaded service: {e}")))?;
+    if !output.status.success() {
+        return Err(AppError::Launchctl(format!(
+            "failed to start loaded service: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
+}
+
 pub fn kickstart(label: &str) -> Result<(), AppError> {
-    let output = Command::new("launchctl")
+    let output = Command::new("/bin/launchctl")
         .args(["kickstart", "-k", &service_target(label)])
         .output()
         .map_err(|e| AppError::Launchctl(format!("failed to run launchctl kickstart: {e}")))?;
@@ -130,7 +138,7 @@ pub fn kickstart(label: &str) -> Result<(), AppError> {
 }
 
 pub fn enable(label: &str) -> Result<(), AppError> {
-    let output = Command::new("launchctl")
+    let output = Command::new("/bin/launchctl")
         .args(["enable", &service_target(label)])
         .output()
         .map_err(|e| AppError::Launchctl(format!("failed to run launchctl enable: {e}")))?;
@@ -145,7 +153,7 @@ pub fn enable(label: &str) -> Result<(), AppError> {
 }
 
 pub fn disable(label: &str) -> Result<(), AppError> {
-    let output = Command::new("launchctl")
+    let output = Command::new("/bin/launchctl")
         .args(["disable", &service_target(label)])
         .output()
         .map_err(|e| AppError::Launchctl(format!("failed to run launchctl disable: {e}")))?;

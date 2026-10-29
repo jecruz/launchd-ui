@@ -125,13 +125,13 @@ Semi-autonomous mode is deliberately conservative. When enabled, only safe user-
 
 - Arbitrary model-generated shell commands are never executed.
 - Health URLs must use HTTP(S) and loopback IPs or `localhost` (pinned to loopback). Native HTTP probes bypass proxies, reject redirects and URL credentials, share a five-second check budget, and read at most 64 KiB. Response bodies are never persisted.
-- System agents and daemons stay read-only in the UI and backend.
+- System agents and daemons stay read-only in the UI and backend. Health observations are saved only in the app-owned overlay, never in system plists.
 - User-agent mutations require a `~/Library/LaunchAgents/*.plist` path.
-- Mutation targets must be regular owned files directly inside that directory, with matching filename, plist label, and request label. Traversal, symbolic links, and hardlinks are rejected. New labels use letters, digits, dots, underscores, and hyphens; creation cannot overwrite a file. Log directories must already exist.
+- Mutation targets must be regular owned files directly inside that directory, with matching filename, plist label, and request label. Traversal, symbolic links, and hardlinks are rejected. New labels use letters, digits, dots, underscores, and hyphens; creation cannot overwrite a file. Log directories must already exist and have no symlink components; the standard root-owned macOS `/tmp` and `/var` aliases are accepted.
 - Log clearing requires a validated user-agent plist declaring that exact log path; system-job logs are read-only. The backend independently restricts automatic actions to start/kickstart.
 - Semi-autonomous execution is opt-in and limited to safe user-agent start/kickstart proposals.
-- Enable and disable use `launchctl bootstrap` and `launchctl bootout` with the actual plist path.
-- Start, stop, restart, and kickstart use the current `gui/<uid>/<label>` target.
+- Enable, disable, and kickstart use the current `gui/<uid>/<label>` target. Start bootstraps an unloaded plist, kickstarts a loaded idle job without killing it, and leaves a running job alone. Stop and restart boot out the validated plist path.
+- File writes retain the validated inode through directory/file descriptors; launchctl pathname operations recheck file identity immediately before execution.
 - Approved actions return the exact display command plus verified post-action status.
 - The audit trail retains prompt, job context, structured result, raw response, and runtime command line.
 

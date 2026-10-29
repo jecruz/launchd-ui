@@ -9,8 +9,6 @@ use crate::types::{
     ServiceRepairSuggestion,
 };
 use std::collections::HashMap;
-use std::io::Write;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 fn current_epoch_millis() -> String {
     let now = std::time::SystemTime::now();
@@ -675,56 +673,76 @@ fn suggest_repair(
     }
 }
 
+fn start_disposition(service: Option<&launchctl::LoadedService>) -> &'static str {
+    match service {
+        Some(service) if service.pid.is_some() => "running",
+        Some(_) => "loaded",
+        None => "unloaded",
+    }
+}
+
 #[tauri::command]
 pub async fn start_job(plist_path: String) -> Result<(), AppError> {
-    let (plist_path, _) = crate::user_agent::load(&plist_path, None)?;
-    // Starting must not stop an already running job, including in auto-apply mode.
-    launchctl::bootstrap(&plist_path)
+    let agent = crate::user_agent::load(&plist_path, None)?;
+    let loaded = launchctl::list_loaded()?;
+    let disposition = start_disposition(loaded.iter().find(|s| s.label == agent.config.label));
+    agent.ensure_current()?;
+    match disposition {
+        "running" => Ok(()),
+        "loaded" => launchctl::start_loaded(&agent.config.label),
+        _ => launchctl::bootstrap(&agent.path()),
+    }
 }
 
 #[tauri::command]
 pub async fn stop_job(plist_path: String) -> Result<(), AppError> {
-    let (plist_path, _) = crate::user_agent::load(&plist_path, None)?;
-    launchctl::bootout(&plist_path)
+    let agent = crate::user_agent::load(&plist_path, None)?;
+    agent.ensure_current()?;
+    launchctl::bootout(&agent.path())
 }
 
 #[tauri::command]
 pub async fn restart_job(plist_path: String) -> Result<(), AppError> {
-    let (plist_path, _) = crate::user_agent::load(&plist_path, None)?;
-    let _ = launchctl::bootout(&plist_path);
-    launchctl::bootstrap(&plist_path)
+    let agent = crate::user_agent::load(&plist_path, None)?;
+    agent.ensure_current()?;
+    launchctl::bootout(&agent.path())?;
+    agent.ensure_current()?;
+    launchctl::bootstrap(&agent.path())
 }
 
 #[tauri::command]
 pub async fn kickstart_job(label: String, plist_path: String) -> Result<(), AppError> {
-    let (plist_path, _) = crate::user_agent::load(&plist_path, Some(&label))?;
-    // Ensure the service is loaded before kickstarting
-    let loaded = launchctl::list_loaded().unwrap_or_default();
-    let is_loaded = loaded.iter().any(|s| s.label == label);
-    if !is_loaded {
-        launchctl::bootstrap(&plist_path)?;
+    let agent = crate::user_agent::load(&plist_path, Some(&label))?;
+    let loaded = launchctl::list_loaded()?;
+    agent.ensure_current()?;
+    if !loaded.iter().any(|s| s.label == label) {
+        launchctl::bootstrap(&agent.path())?;
     }
+    agent.ensure_current()?;
     launchctl::kickstart(&label)
 }
 
 #[tauri::command]
 pub async fn enable_job(label: String, plist_path: String) -> Result<(), AppError> {
-    crate::user_agent::load(&plist_path, Some(&label))?;
+    let agent = crate::user_agent::load(&plist_path, Some(&label))?;
+    agent.ensure_current()?;
     launchctl::enable(&label)
 }
 
 #[tauri::command]
 pub async fn disable_job(label: String, plist_path: String) -> Result<(), AppError> {
-    crate::user_agent::load(&plist_path, Some(&label))?;
+    let agent = crate::user_agent::load(&plist_path, Some(&label))?;
+    agent.ensure_current()?;
     launchctl::disable(&label)
 }
 
 /// Save an existing user agent without allowing the caller to change its identity.
 #[tauri::command]
 pub async fn save_job(plist_path: String, config: PlistConfig) -> Result<(), AppError> {
-    let (plist_path, _) = crate::user_agent::load(&plist_path, Some(&config.label))?;
-    plist_util::write_plist(&plist_path, &config)?;
-    service_overlays::upsert_service_override(&plist_path, &config.metadata)
+    let agent = crate::user_agent::load(&plist_path, Some(&config.label))?;
+    crate::user_agent::validate_log_parents(&config)?;
+    agent.write(&plist_util::serialize_plist(&config)?)?;
+    service_overlays::upsert_service_override(&agent.path(), &config.metadata)
 }
 
 /// Create a new user agent with a single safe label and exclusive file creation.
@@ -736,28 +754,9 @@ pub async fn create_job(label: String, config: PlistConfig) -> Result<String, Ap
             "Request and plist labels must match.".into(),
         ));
     }
-    let agents_dir = plist_util::get_user_agents_dir();
-    std::fs::create_dir_all(&agents_dir)?;
-    let target = agents_dir.join(format!("{label}.plist"));
-    let path = crate::user_agent::path(
-        target
-            .to_str()
-            .ok_or_else(|| AppError::Plist("invalid path".into()))?,
-        false,
-    )?;
+    crate::user_agent::validate_log_parents(&config)?;
     let bytes = plist_util::serialize_plist(&config)?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&path)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    let path_str = path
-        .to_str()
-        .ok_or_else(|| AppError::Plist("invalid path".into()))?
-        .to_string();
+    let path_str = crate::user_agent::create(&label, &bytes)?;
     service_overlays::upsert_service_override(&path_str, &config.metadata)?;
     Ok(path_str)
 }
@@ -765,19 +764,22 @@ pub async fn create_job(label: String, config: PlistConfig) -> Result<String, Ap
 /// Save raw XML only when it retains the validated user agent's existing label.
 #[tauri::command]
 pub async fn save_raw_plist(plist_path: String, xml: String) -> Result<(), AppError> {
-    let (plist_path, config) = crate::user_agent::load(&plist_path, None)?;
-    crate::user_agent::validate_xml_label(&xml, &config.label)?;
-    plist_util::write_raw_plist(&plist_path, &xml)
+    let agent = crate::user_agent::load(&plist_path, None)?;
+    crate::user_agent::validate_xml_label(&xml, &agent.config.label)?;
+    crate::user_agent::validate_log_parents(&plist_util::parse_plist_bytes(xml.as_bytes())?)?;
+    agent.write(xml.as_bytes())
 }
 
 /// Delete only a validated user agent whose request label matches its plist.
 #[tauri::command]
 pub async fn delete_job(plist_path: String, label: String) -> Result<(), AppError> {
-    let (plist_path, _) = crate::user_agent::load(&plist_path, Some(&label))?;
-    let _ = launchctl::bootout(&plist_path);
-    let _ = launchctl::disable(&label);
-    std::fs::remove_file(&plist_path)?;
-    service_overlays::remove_service_override(&plist_path)?;
+    let agent = crate::user_agent::load(&plist_path, Some(&label))?;
+    agent.ensure_current()?;
+    launchctl::bootout(&agent.path())?;
+    agent.ensure_current()?;
+    launchctl::disable(&label)?;
+    agent.remove()?;
+    service_overlays::remove_service_override(&agent.path())?;
     Ok(())
 }
 
@@ -808,8 +810,9 @@ pub async fn check_service_health(plist_path: String) -> Result<HealthCheckResul
     updated_metadata.last_health_check_at = Some(checked_at.clone());
     if job.source == crate::types::JobSource::UserAgent {
         crate::user_agent::load(&plist_path, Some(&job.label))?;
-        service_overlays::upsert_service_override(&plist_path, &updated_metadata)?;
     }
+    // Observations live in app-owned state; system launchd jobs themselves stay read-only.
+    service_overlays::upsert_service_override(&plist_path, &updated_metadata)?;
     Ok(HealthCheckResult {
         status,
         detail,
@@ -893,29 +896,13 @@ pub async fn read_log_file(
 /// Clear only a non-symlink log declared by a validated user-agent plist.
 #[tauri::command]
 pub async fn clear_log_file(path: String, plist_path: String) -> Result<(), AppError> {
-    let (_, config) = crate::user_agent::load(&plist_path, None)?;
-    clear_declared_log(&path, &config)
+    let agent = crate::user_agent::load(&plist_path, None)?;
+    agent.ensure_current()?;
+    clear_declared_log(&path, &agent.config)
 }
 
 fn clear_declared_log(path: &str, config: &PlistConfig) -> Result<(), AppError> {
-    if ![&config.standard_out_path, &config.standard_error_path]
-        .iter()
-        .any(|candidate| candidate.as_deref() == Some(path))
-    {
-        return Err(AppError::Plist(
-            "Log is not declared by this user agent.".into(),
-        ));
-    }
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.nlink() != 1 {
-        return Err(AppError::Plist(
-            "Only a regular unlinked log file can be cleared.".into(),
-        ));
-    }
+    let file = crate::user_agent::open_log_for_clear(path, config)?;
     file.set_len(0)?;
     Ok(())
 }
@@ -1034,6 +1021,19 @@ pub async fn apply_approved_agent_action(
 mod tests {
     use super::*;
     use crate::types::JobSource;
+
+    #[test]
+    fn start_distinguishes_loaded_and_running_without_a_stop() {
+        let mut service = launchctl::LoadedService {
+            label: "safe".into(),
+            pid: None,
+            last_exit_code: Some(0),
+        };
+        assert_eq!(start_disposition(None), "unloaded");
+        assert_eq!(start_disposition(Some(&service)), "loaded");
+        service.pid = Some(123);
+        assert_eq!(start_disposition(Some(&service)), "running");
+    }
 
     fn security_test_config() -> PlistConfig {
         serde_json::from_value(serde_json::json!({
