@@ -73,7 +73,7 @@ When a plist cannot be modified directly, Daemonic also keeps a durable sidecar 
 - `HealthDetail`
 - `LastHealthCheckAt`
 
-The job detail pane can run the configured health check and persist the latest result back into that sidecar index. Bulk group actions are available from the dashboard cards for user agents only.
+The job detail pane can run the configured health check URL and persist the latest result back into that sidecar index. Command-based health checks (`HealthCheckCommand`) are disabled and report `unknown` when no health check URL is configured; stored command text is never executed. Bulk group actions are available from the dashboard cards for user agents only.
 
 If a service has no explicit health URL or command, Daemonic falls back to lightweight local heuristics based on configured ports and a few common service labels. When nothing is configured it reports `unknown` instead of failing hard, so the user still gets a status readout.
 

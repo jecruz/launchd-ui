@@ -402,31 +402,11 @@ fn run_health_check_command(
         return Ok(("unhealthy".to_string(), detail));
     }
 
-    if let Some(command) = metadata.health_check_command.as_ref() {
-        let output = Command::new("sh")
-            .arg("-lc")
-            .arg(command)
-            .output()
-            .map_err(|e| AppError::AgentRuntime(format!("failed to run health command: {e}")))?;
-        if output.status.success() {
-            let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            return Ok((
-                "healthy".to_string(),
-                if response.is_empty() {
-                    format!("health command succeeded: {command}")
-                } else {
-                    format!("health command succeeded: {response}")
-                },
-            ));
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if metadata.health_check_command.is_some() {
         return Ok((
-            "unhealthy".to_string(),
-            if stderr.is_empty() {
-                format!("health command failed with status {}", output.status)
-            } else {
-                format!("health command failed: {stderr}")
-            },
+            "unknown".to_string(),
+            "Command-based health checks are disabled; configure a health check URL instead."
+                .to_string(),
         ));
     }
 
@@ -1019,6 +999,30 @@ pub async fn apply_approved_agent_action(
 mod tests {
     use super::*;
     use crate::types::JobSource;
+
+    #[test]
+    fn health_check_rejects_shell_commands_without_executing_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("command-executed");
+        let plist: PlistConfig = serde_json::from_value(serde_json::json!({
+            "label": "com.example.health-check",
+            "raw_xml": "",
+            "metadata": {
+                "health_check_command": format!("touch '{}'", marker.display())
+            }
+        }))
+        .unwrap();
+
+        let (status, detail) =
+            run_health_check_command(&plist.label, &plist, &plist.metadata).unwrap();
+
+        assert!(
+            !marker.exists(),
+            "health checks must not execute shell text"
+        );
+        assert_eq!(status, "unknown");
+        assert!(detail.contains("Command-based health checks are disabled"));
+    }
 
     #[test]
     fn ensure_user_agent_accepts_home_launch_agents() {
