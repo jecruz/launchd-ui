@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Reject malformed raw schedule values before every parse so invalid integers cannot become wildcard schedules; preserve original XML comments.
+- Capture and sync deletion targets before removing them, bind log reads to declared destinations, and protect UI input during preference bootstrap.
+- Preserve successful action results after refresh failures, block concurrent suggested fixes, display generated risks, and reject invalid manual port values.
+
 - Make the typecheck command check referenced TypeScript projects, matching production compilation.
 - Preserve original plist identities through transactions and atomic exchange; reject competing replacements and retain unresolved conflicts for operator review.
 - Block saving incomplete restored drafts and validate raw port elements before conversion.

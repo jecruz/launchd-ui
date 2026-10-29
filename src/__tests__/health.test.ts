@@ -92,5 +92,6 @@ it("requires a recent non-future probe and a running job before showing Healthy"
   expect(deriveHealthText({ ...job, status: "Loaded" })).toBe("Loaded")
   expect(deriveHealthText({ ...job, metadata: { ...metadata, last_health_check_at: String(Date.now() - 301_000) } })).toBe("Running")
   expect(deriveHealthText({ ...job, metadata: { ...metadata, last_health_check_at: String(Date.now() + 60_000) } })).toBe("Running")
-  expect(deriveHealthText({ ...job, last_exit_code: 1 })).toBe("Attention")
+  expect(deriveHealthText({ ...job, last_exit_code: 1 })).toBe("Healthy")
+  expect(deriveHealthText({ ...job, status: "Loaded", last_exit_code: 1 })).toBe("Attention")
 })

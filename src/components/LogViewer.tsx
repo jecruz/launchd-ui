@@ -30,9 +30,9 @@ export function LogViewer({ logPath, plistPath, readOnly = false, tailLines = 20
   useEffect(() => {
     setClearError(null)
     if (logPath) {
-      fetchLog(logPath, tailLines)
+      fetchLog(logPath, plistPath, tailLines)
     }
-  }, [logPath, tailLines, fetchLog])
+  }, [logPath, plistPath, tailLines, fetchLog])
 
   if (!logPath) {
     return (
@@ -61,7 +61,7 @@ export function LogViewer({ logPath, plistPath, readOnly = false, tailLines = 20
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => fetchLog(logPath, tailLines)}
+            onClick={() => fetchLog(logPath, plistPath, tailLines)}
             disabled={loading}
           >
             <RefreshCw className={`h-3 w-3 mr-1 ${loading ? "animate-spin" : ""}`} />
@@ -71,7 +71,8 @@ export function LogViewer({ logPath, plistPath, readOnly = false, tailLines = 20
             variant="ghost"
             size="sm"
             onClick={async () => {
-              try { await clearLogFile(logPath, plistPath); await fetchLog(logPath, tailLines) }
+              setClearError(null)
+              try { await clearLogFile(logPath, plistPath); await fetchLog(logPath, plistPath, tailLines) }
               catch (error) { setClearError(String(error)) }
             }}
             disabled={readOnly || loading}

@@ -374,8 +374,7 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
         command_proposal: proposal.command_proposal,
         auto_apply: automatic,
       })
-      await onApplied?.()
-      if (generation !== currentSelection.current.generation) return
+      if (generation === currentSelection.current.generation) {
       setAppliedAction(`${result.action}: ${result.command}`)
       setVerificationDetail({
         ...(jobDetail ?? selectedJob),
@@ -404,6 +403,10 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
         last_exit_code: result.verified_last_exit_code,
         last_run_at: jobDetail?.last_run_at ?? selectedJob.last_run_at,
       })
+      }
+      try { await onApplied?.() } catch (error) {
+        if (generation === currentSelection.current.generation) setError(`Action succeeded; job refresh failed: ${String(error)}`)
+      }
     } catch (e) {
       if (generation === currentSelection.current.generation) setError(String(e))
       throw e

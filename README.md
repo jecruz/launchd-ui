@@ -106,7 +106,7 @@ Quick start:
 4. Choose `Summarize`, `Plan fix`, or `Propose command`, then click `Run Prompt`.
 5. Use the `LLM draft` or `Migration assistant` panels in `New Agent` to prefill a LaunchAgent from a natural-language request or a Docker/OrbStack service definition.
 6. In a job’s `Health` panel, click `Repair` to open the editor with inferred health check URL or command defaults when the service type is recognizable.
-7. A successful probe is displayed as healthy only for a running service and for five minutes after the check. Historical startup markers never override a non-zero exit code.
+7. A successful probe is displayed as healthy only for a running service and for five minutes after the check. A fresh successful probe for a currently running service can supersede its historical exit status; historical startup text cannot.
 8. Timestamp-free stderr does not erase independent failure evidence. Diagnostic and viewer tails read at most 256 KiB and 2,000 lines, including files with very long lines.
 9. When a job has no explicit health check configured and no concrete repair suggestion, the Health panel stays informational and hides the `Repair` button.
 10. Hover any code or log block to reveal a copy button. Press `Cmd/Ctrl+A` while the block is focused to select all text inside it, then click copy to capture the selected text or the raw block. Click a job label or file path label to copy it directly.

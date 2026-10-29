@@ -164,6 +164,7 @@ pub fn parse_plist(path: &str) -> Result<PlistConfig, AppError> {
 
 /// Parse a bounded caller-owned plist buffer without reopening its filesystem path.
 pub fn parse_plist_bytes(bytes: &[u8]) -> Result<PlistConfig, AppError> {
+    validate_raw_schedule(bytes)?;
     let value = Value::from_reader(Cursor::new(bytes))
         .map_err(|e| AppError::Plist(format!("invalid plist: {e}")))?;
     let dict = value
@@ -176,7 +177,11 @@ pub fn parse_plist_bytes(bytes: &[u8]) -> Result<PlistConfig, AppError> {
     value
         .to_writer_xml(&mut raw_xml)
         .map_err(|e| AppError::Plist(format!("invalid plist: {e}")))?;
-    let raw_xml = String::from_utf8_lossy(&raw_xml).into_owned();
+    let raw_xml = std::str::from_utf8(bytes)
+        .ok()
+        .filter(|_| !bytes.starts_with(b"bplist"))
+        .map(str::to_owned)
+        .unwrap_or_else(|| String::from_utf8_lossy(&raw_xml).into_owned());
 
     Ok(PlistConfig {
         label,
@@ -525,6 +530,27 @@ mod tests {
         file.write_all(xml.as_bytes()).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    #[test]
+    fn rejects_malformed_schedule_values_before_a_round_trip_and_preserves_xml() {
+        for value in [
+            "<integer>-1</integer>",
+            "<integer>4294967296</integer>",
+            "<integer>60</integer>",
+            "<real>1.5</real>",
+            "<string>5</string>",
+        ] {
+            let xml = format!(
+                "<plist><dict><key>Label</key><string>safe</string><key>StartCalendarInterval</key><dict><key>Minute</key>{value}</dict></dict></plist>"
+            );
+            assert!(parse_plist_bytes(xml.as_bytes()).is_err());
+        }
+        let xml = "<plist><!-- preserve this comment --><dict><key>Label</key><string>safe</string><key>StartCalendarInterval</key><dict><key>Minute</key><integer>5</integer></dict></dict></plist>";
+        let parsed = parse_plist_bytes(xml.as_bytes()).unwrap();
+        assert_eq!(parsed.raw_xml, xml);
+        let again = parse_plist_bytes(&serialize_plist(&parsed).unwrap()).unwrap();
+        assert_eq!(again.start_calendar_interval.unwrap()[0].minute, Some(5));
     }
 
     #[test]

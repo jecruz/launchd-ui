@@ -16,7 +16,7 @@ type UseLogsReturn = {
   modifiedAt: Date | null
   loading: boolean
   error: string | null
-  fetchLog: (path: string, tailLines?: number) => Promise<void>
+  fetchLog: (path: string, plistPath: string, tailLines?: number) => Promise<void>
 }
 
 export function useLogs(): UseLogsReturn {
@@ -27,14 +27,14 @@ export function useLogs(): UseLogsReturn {
 
   const request = useRef(0)
   useEffect(() => () => { request.current += 1 }, [])
-  const fetchLog = useCallback(async (path: string, tailLines?: number) => {
+  const fetchLog = useCallback(async (path: string, plistPath: string, tailLines?: number) => {
     const generation = ++request.current
     setContent("")
     setModifiedAt(null)
     setLoading(true)
     setError(null)
     try {
-      const result = await readLogFile(path, tailLines)
+      const result = await readLogFile(path, plistPath, tailLines)
       if (generation !== request.current) return
       setContent(stripAnsiAndControl(result.content))
       const modified = result.modified_at ? new Date(Number(result.modified_at)) : null

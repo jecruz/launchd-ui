@@ -79,3 +79,14 @@ it("opening a new draft invalidates a delayed list edit", async () => {
   expect(screen.getByLabelText(/^Label/)).toHaveValue("")
   view.unmount()
 })
+
+it("keeps preference-backed controls unavailable until a deferred bootstrap completes", async () => {
+  let finish!: (value: unknown) => void
+  setFakeHandler("get_app_preferences", () => new Promise((resolve) => { finish = resolve }))
+  const view = render(<App />)
+  expect(screen.getByRole("status")).toHaveTextContent("Loading saved preferences")
+  expect(screen.queryByRole("button", { name: "New Agent" })).not.toBeInTheDocument()
+  await act(async () => finish({ search: "loaded", source_filter: "All", group_filter: "All", sort_key: "label", sort_direction: "asc", agent_mode: "approval", detail_open: false, form_open: false, selected_plist_path: null, job_form_draft: null, window_geometry: null }))
+  expect(await screen.findByDisplayValue("loaded")).toBeInTheDocument()
+  view.unmount()
+})

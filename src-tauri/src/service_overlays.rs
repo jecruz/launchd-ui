@@ -404,6 +404,8 @@ mod tests {
         let directory = temp.path().join("state");
         let (path, before) = fixture(&root, "safe", "before");
         let expected = user_agent::load_in(&root, Path::new(&path), None).unwrap();
+        let path = expected.path();
+        assert!(expected.ensure_current().is_ok());
         let mut config = plist_util::parse_plist_bytes(&before).unwrap();
         config.metadata.group = Some("external".into());
         let external = plist_util::serialize_plist(&config).unwrap();

@@ -93,7 +93,7 @@ fn open_at(directory: &File, name: &CString, flags: i32) -> Result<File, AppErro
         libc::openat(
             directory.as_raw_fd(),
             name.as_ptr(),
-            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            flags | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             0o600 as libc::c_uint,
         )
     };
@@ -336,14 +336,59 @@ impl CheckedAgent {
         Ok(bytes)
     }
 
-    /// Unlink a checked entry relative to the validated directory descriptor.
+    /// Atomically capture a deletion target, validate its inode, and sync the removal.
     pub fn remove(&self) -> Result<(), AppError> {
+        self.remove_after_check(|| Ok(()))
+    }
+
+    fn remove_after_check(
+        &self,
+        after_check: impl FnOnce() -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
         self.ensure_current()?;
-        // SAFETY: the directory and filename remain valid; unlinkat cannot escape
-        // this directory because the checked name is a single path component.
-        if unsafe { libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0) } != 0 {
+        after_check()?;
+        let tombstone = CString::new(format!(
+            ".daemonic-{}-{}.delete",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ))
+        .map_err(|_| rejected())?;
+        let rename = |from: &CString, to: &CString| {
+            // SAFETY: exclusive rename stays within the retained user-agent directory.
+            if unsafe {
+                libc::renameatx_np(
+                    self.directory.as_raw_fd(),
+                    from.as_ptr(),
+                    self.directory.as_raw_fd(),
+                    to.as_ptr(),
+                    libc::RENAME_EXCL,
+                )
+            } != 0
+            {
+                return Err(AppError::Io(std::io::Error::last_os_error()));
+            }
+            Ok(())
+        };
+        rename(&self.name, &tombstone)?;
+        let captured = open_at(&self.directory, &tombstone, libc::O_RDONLY)
+            .and_then(|file| file.metadata().map_err(Into::into));
+        if !captured
+            .as_ref()
+            .is_ok_and(|actual| same_moved_file(&self.identity, actual))
+        {
+            rename(&tombstone, &self.name).map_err(|_| {
+                AppError::Plist(
+                    "Deletion conflict; captured entry retained for operator review.".into(),
+                )
+            })?;
+            self.directory.sync_all()?;
+            return Err(rejected());
+        }
+        // SAFETY: unlink only the validated captured entry, never a new target entry.
+        if unsafe { libc::unlinkat(self.directory.as_raw_fd(), tombstone.as_ptr(), 0) } != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
+        self.directory.sync_all()?;
         Ok(())
     }
 }
@@ -599,6 +644,27 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(validate_log_parents(&config).is_err());
+    }
+
+    #[test]
+    fn deletion_preserves_a_replacement_after_the_final_check() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "safe.plist", "safe");
+        let agent = load_in(root.path(), &path, None).unwrap();
+        let other = root.path().join("other");
+        let external = b"<plist><dict><key>Label</key><string>safe</string><key>Comment</key><string>external</string></dict></plist>";
+        std::fs::write(&other, external).unwrap();
+        assert!(
+            agent
+                .remove_after_check(|| {
+                    std::fs::rename(&other, &path)?;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), external);
+        load_in(root.path(), &path, None).unwrap().remove().unwrap();
+        assert!(!path.exists());
     }
 
     #[test]

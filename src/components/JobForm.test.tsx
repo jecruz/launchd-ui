@@ -302,7 +302,7 @@ describe("JobForm draft helpers", () => {
         wake_system: false,
         summary: "Backup agent draft ready.",
         notes: ["Uses the provided backup script."],
-        risks: [],
+        risks: ["Review generated command permissions."],
       }),
       command_line: "mock-runner --prompt",
     }))
@@ -327,7 +327,7 @@ describe("JobForm draft helpers", () => {
     )
     await user.click(screen.getByRole("button", { name: "Draft with AI" }))
 
-    await screen.findByText("Backup agent draft ready. Notes: Uses the provided backup script.")
+    await screen.findByText("Backup agent draft ready. Notes: Uses the provided backup script. Risks: Review generated command permissions.")
     expect(screen.getByLabelText(/^Label/i)).toHaveValue("com.example.backup-agent")
     expect(screen.getByLabelText(/^Program Arguments/i)).toHaveValue(
       "/usr/local/bin/backup.sh --target /Users/test/Backups"
@@ -541,5 +541,29 @@ it("blocks saving an omitted restored draft and an invalid calendar range", asyn
   await userEvent.setup().click(screen.getByRole("button", { name: "Create" }))
   expect(onSave).not.toHaveBeenCalled()
   expect(screen.getByText(/minute must be a whole number/)).toBeInTheDocument()
+  view.unmount()
+})
+
+it.each(["65536", "80.5"])("rejects invalid manual port %s instead of truncating it", async (port) => {
+  const draft = createEmptyJobFormDraft()
+  draft.config.label = "com.example.ports"
+  const onSave = vi.fn()
+  const view = render(<JobForm open draft={draft} onSave={onSave} onClose={vi.fn()} onDraftChange={vi.fn()} />)
+  await userEvent.setup().type(screen.getByLabelText("Ports"), port)
+  await userEvent.setup().click(screen.getByRole("button", { name: "Create" }))
+  expect(onSave).not.toHaveBeenCalled()
+  expect(screen.getByText("Ports must be whole numbers from 1 to 65535.")).toBeInTheDocument()
+  view.unmount()
+})
+
+it("supports explicitly clearing manually entered ports", async () => {
+  const draft = createEmptyJobFormDraft()
+  draft.config.label = "com.example.ports"
+  draft.config.metadata.ports = [8001]
+  const onSave = vi.fn()
+  const view = render(<JobForm open draft={draft} onSave={onSave} onClose={vi.fn()} onDraftChange={vi.fn()} />)
+  await userEvent.setup().clear(screen.getByLabelText("Ports"))
+  await userEvent.setup().click(screen.getByRole("button", { name: "Create" }))
+  expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ ports: [] }) }), undefined)
   view.unmount()
 })

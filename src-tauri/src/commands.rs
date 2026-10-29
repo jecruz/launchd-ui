@@ -61,6 +61,23 @@ fn read_tail(path: &str, limit: usize) -> Result<(String, Option<String>), AppEr
     Ok((content, modified))
 }
 
+fn read_declared_log(
+    config: &PlistConfig,
+    path: &str,
+    limit: usize,
+) -> Result<(String, Option<String>), AppError> {
+    if ![&config.standard_out_path, &config.standard_error_path]
+        .into_iter()
+        .flatten()
+        .any(|declared| declared == path)
+    {
+        return Err(AppError::Plist(
+            "Requested log is not declared by its plist.".into(),
+        ));
+    }
+    read_tail(path, limit)
+}
+
 fn tail_file(path: &str, limit: usize) -> Option<String> {
     read_tail(path, limit)
         .ok()
@@ -392,7 +409,11 @@ fn run_health_check_command(
         }
 
         if let Some(port) = parse_program_port(plist.program_arguments.as_ref()) {
-            if !url.contains(&port.to_string()) {
+            if reqwest::Url::parse(url)
+                .ok()
+                .and_then(|url| url.port_or_known_default())
+                != Some(port)
+            {
                 let fallback_urls = [
                     format!("http://127.0.0.1:{port}/health"),
                     format!("http://127.0.0.1:{port}/status"),
@@ -470,7 +491,10 @@ fn suggest_repair(
                 .parse::<u128>()
                 .is_ok_and(|now| time <= now && now - time <= 300_000)
         });
-    if job.last_exit_code.is_some_and(|code| code != 0) {
+    let fresh_success = fresh
+        && job.status == JobStatus::Running
+        && metadata.health_status.as_deref() == Some("healthy");
+    if !fresh_success && job.last_exit_code.is_some_and(|code| code != 0) {
         observed.health_status = Some("unhealthy".into());
         observed.health_detail = Some("The last process exit was nonzero.".into());
     } else if !fresh
@@ -481,7 +505,7 @@ fn suggest_repair(
         observed.health_detail = Some("Health observation is missing, stale, or no longer backed by a running process; run a fresh probe.".into());
     }
     let metadata = &observed;
-    if job.last_exit_code.is_some() && job.last_exit_code != Some(0) {
+    if !fresh_success && job.last_exit_code.is_some() && job.last_exit_code != Some(0) {
         likely_causes.push(format!("The last exit code was {:?}", job.last_exit_code));
     }
     if stderr_lower.contains("connection refused") || stdout_lower.contains("connection refused") {
@@ -555,7 +579,7 @@ fn suggest_repair(
         });
     }
 
-    let summary = if job.last_exit_code.is_some_and(|code| code != 0) {
+    let summary = if !fresh_success && job.last_exit_code.is_some_and(|code| code != 0) {
         "The service exited with a nonzero status; inspect its current configuration and logs."
             .to_string()
     } else if metadata.health_status.as_deref() == Some("healthy") {
@@ -854,9 +878,19 @@ pub struct LogFileResult {
 #[tauri::command]
 pub async fn read_log_file(
     path: String,
+    plist_path: String,
     tail_lines: Option<usize>,
 ) -> Result<LogFileResult, AppError> {
-    let (content, modified_at) = read_tail(&path, tail_lines.unwrap_or(200))?;
+    if !plist_util::scan_plist_files()
+        .iter()
+        .any(|(known, _)| known == &plist_path)
+    {
+        return Err(AppError::Plist(
+            "Log owner must be a listed launchd plist.".into(),
+        ));
+    }
+    let config = plist_util::parse_plist(&plist_path)?;
+    let (content, modified_at) = read_declared_log(&config, &path, tail_lines.unwrap_or(200))?;
     Ok(LogFileResult {
         content,
         modified_at,
@@ -1003,6 +1037,18 @@ mod tests {
         assert_eq!(start_disposition(Some(&service)), "loaded");
         service.pid = Some(123);
         assert_eq!(start_disposition(Some(&service)), "running");
+    }
+
+    #[test]
+    fn log_reads_require_the_owning_plists_declared_destination() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "log data").unwrap();
+        let mut config: PlistConfig =
+            serde_json::from_value(serde_json::json!({"label":"safe", "raw_xml":""})).unwrap();
+        let path = file.path().to_str().unwrap();
+        assert!(read_declared_log(&config, path, 10).is_err());
+        config.standard_out_path = Some(path.into());
+        assert_eq!(read_declared_log(&config, path, 10).unwrap().0, "log data");
     }
 
     #[test]
@@ -1354,7 +1400,7 @@ mod tests {
             source: JobSource::UserAgent,
             status: JobStatus::Running,
             pid: Some(1234),
-            last_exit_code: Some(0),
+            last_exit_code: Some(1),
             plist: PlistConfig {
                 label: "ai.cybergrunt.uptime-kuma".to_string(),
                 program: None,

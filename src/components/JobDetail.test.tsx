@@ -329,3 +329,21 @@ it("refreshes persisted metadata even when the following health check fails", as
   view.unmount()
   resetFakeHandlers()
 })
+
+it("allows only one suggested-metadata save while verification is pending", async () => {
+  const save = vi.fn()
+  let finish!: (value: unknown) => void
+  setFakeHandler("get_job_detail", () => baseJob)
+  setFakeHandler("diagnose_service", () => ({ summary: "Check metadata", likely_causes: [], suggestions: [], health_status: "unknown", health_detail: null, suggested_metadata: baseJob.plist.metadata, stderr_excerpt: null, stdout_excerpt: null }))
+  setFakeHandler("save_job", save)
+  setFakeHandler("check_service_health", () => new Promise((resolve) => { finish = resolve }))
+  const view = render(<JobDetail plistPath={baseJob.plist_path} open onClose={vi.fn()} onEdit={vi.fn()} onRepair={vi.fn()} />)
+  const apply = await screen.findByRole("button", { name: "Apply Suggested Fix" })
+  await userEvent.setup().click(apply)
+  expect(apply).toBeDisabled()
+  await userEvent.setup().click(apply)
+  expect(save).toHaveBeenCalledTimes(1)
+  await act(async () => finish({ status: "unknown", detail: "Unavailable", checked_at: String(Date.now()) }))
+  view.unmount()
+  resetFakeHandlers()
+})

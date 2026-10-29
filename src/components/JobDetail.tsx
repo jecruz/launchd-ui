@@ -282,7 +282,7 @@ export function JobDetail({ plistPath, open, onClose, onEdit, onRepair }: JobDet
                 {diagnosisLoading ? "Diagnosing..." : "Diagnose"}
               </Button>
               {job.source === "UserAgent" && diagnosis?.suggested_metadata && (
-                <Button size="sm" variant="secondary" onClick={handleApplySuggestedMetadata}>
+                <Button size="sm" variant="secondary" onClick={handleApplySuggestedMetadata} disabled={checkingHealth || diagnosisLoading}>
                   <Wrench className="h-3 w-3 mr-1" />
                   Apply Suggested Fix
                 </Button>

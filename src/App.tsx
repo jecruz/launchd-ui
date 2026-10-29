@@ -161,6 +161,8 @@ function App() {
   const formGeneration = useRef(0)
   const writableRef = useRef(preferencesWritable)
   writableRef.current = preferencesWritable
+  const readyRef = useRef(preferencesReady)
+  readyRef.current = preferencesReady
   const [reloadPreferences, setReloadPreferences] = useState(0)
   const [agentMode, setAgentMode] = useState<AgentMode>("approval")
   const {
@@ -337,6 +339,7 @@ function App() {
         }
 
         if (event.payload === "new-agent") {
+          if (!readyRef.current) return
           await openControlCenter()
           setEditingJob(null)
           setJobFormDraft(createEmptyJobFormDraft())
@@ -546,6 +549,8 @@ function App() {
   )
 
   const modeCard = modeCards.find((item) => item.id === agentMode) ?? modeCards[1]
+
+  if (!preferencesReady) return <div role="status">Loading saved preferences...</div>
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(45,212,191,0.16),_transparent_34%),radial-gradient(circle_at_top_right,_rgba(59,130,246,0.14),_transparent_28%),linear-gradient(180deg,_#020617_0%,_#0f172a_100%)] text-foreground">

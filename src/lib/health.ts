@@ -42,14 +42,10 @@ function hasExplicitHealthCheck(job: HealthSubject): boolean {
  */
 export function deriveHealthText(job: HealthSubject): string {
   const metadata = getMetadata(job)
-  if (job.last_exit_code !== null && job.last_exit_code !== undefined && job.last_exit_code !== 0) {
-    return "Attention"
-  }
   const checked = Number(metadata.last_health_check_at)
   const fresh = Number.isSafeInteger(checked) && checked > 0 && checked <= Date.now() && Date.now() - checked <= 300_000
-  if (fresh && job.status === "Running" && metadata.health_status === "healthy") {
-    return "Healthy"
-  }
+  if (fresh && job.status === "Running" && metadata.health_status === "healthy") return "Healthy"
+  if (hasNonZeroExitCode(job.last_exit_code)) return "Attention"
   if (fresh && metadata.health_status === "unhealthy") {
     return "Attention"
   }

@@ -593,6 +593,8 @@ export function createRepairJobFormDraftFromJob(
 export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChange }: JobFormProps) {
   const initialDraft = draft ?? (editingJob ? createJobFormDraftFromJob(editingJob) : createEmptyJobFormDraft())
   const [config, setConfig] = useState<PlistConfig>(initialDraft.config)
+  const [portsText, setPortsText] = useState(initialDraft.config.metadata.ports.join(", "))
+  useEffect(() => { setPortsText(config.metadata.ports.join(", ")) }, [config.metadata.ports])
   const [args, setArgs] = useState(initialDraft.args)
   const [scheduleType, setScheduleType] = useState<JobFormScheduleType>(initialDraft.schedule_type)
   const existingRange = initialDraft.config.start_calendar_interval
@@ -832,6 +834,7 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
       [
         generated.summary || "Draft generated. Review the plist settings before saving.",
         ...(generated.notes.length > 0 ? [`Notes: ${generated.notes.join(" • ")}`] : []),
+        ...(generated.risks.length > 0 ? [`Risks: ${generated.risks.join(" • ")}`] : []),
       ].join(" ")
     )
   }
@@ -961,6 +964,8 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
 
   const handleSave = async () => {
     setError(null)
+    const ports = portsText.trim() ? portsText.split(",").map((port) => Number(port.trim())) : []
+    if (ports.some((port) => !Number.isInteger(port) || port < 1 || port > 65535)) { setError("Ports must be whole numbers from 1 to 65535."); return }
     if (sensitiveOmitted) { setError("This restored draft omitted sensitive fields. Reload the original job or start a new draft before saving."); return }
     if (!config.label.trim()) {
       setError("Label is required")
@@ -1337,20 +1342,12 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
               <Input
                 id="metadata-ports"
                 placeholder="8001, 8002"
-                value={config.metadata.ports.join(", ")}
-                onChange={(e) =>
-                  setConfig({
-                    ...config,
-                    metadata: {
-                      ...config.metadata,
-                      ports: e.target.value
-                        .split(",")
-                        .map((port) => Number(port.trim()))
-                        .filter((port) => Number.isFinite(port) && port > 0)
-                        .map((port) => Math.trunc(port)),
-                    },
-                  })
-                }
+                value={portsText}
+                onChange={(e) => {
+                  setPortsText(e.target.value)
+                  const ports = e.target.value.trim() ? e.target.value.split(",").map((port) => Number(port.trim())) : []
+                  if (!e.target.value.trim() || (e.target.value.split(",").every((port) => /^\d+$/.test(port.trim())) && ports.every((port) => Number.isInteger(port) && port > 0 && port <= 65535))) setConfig({ ...config, metadata: { ...config.metadata, ports } })
+                }}
                 spellCheck={false}
                 autoCorrect="off"
               />

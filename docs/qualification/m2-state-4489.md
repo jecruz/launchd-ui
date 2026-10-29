@@ -18,7 +18,7 @@ Production compilation exposed that the previous `tsc --noEmit` script checked o
 
 ## Verification result
 
-Final source checks passed: 56 Rust tests, 111 frontend tests, `cargo clippy` with warnings denied, formatting, `tsc -b`, lint with zero warnings/errors, and a production app bundle. The app was not installed or launched. The frontend tests retain an existing Radix missing-description warning in JobDetail; Vite reports the approximately 508 KiB minified application chunk. Neither is a failing test or runtime acceptance claim.
+Final source checks passed: 59 Rust tests, 118 frontend tests, `cargo clippy` with warnings denied, formatting, `tsc -b`, lint with zero warnings/errors, and a production app bundle. The app was not installed or launched. The frontend tests retain an existing Radix missing-description warning in JobDetail; Vite reports the approximately 508 KiB minified application chunk. Neither is a failing test or runtime acceptance claim.
 
 Independent review `584723f8-a7ea-405d-a7d0-007a936febd3` returned zero criticals and ten warnings. All ten received bounded corrections before the first gate push: retain the command's original file identity inside the transaction; reject raw invalid port elements; compact binary-safe base64 journal snapshots with maximum 1 MiB before/after fixtures; atomically exchange and validate displaced plists with a deterministic post-precheck race fixture; recover from rejected window geometry operations; invalidate delayed list edits on every form opening; refresh persisted metadata after failed health verification; block saving omitted restored drafts; reject invalid calendar bases before range expansion; and display both Day/Weekday OR constraints. The new dependency declaration promotes the already-locked base64 0.22.1 package; no transitive version changed. Review receipt and gate evidence are retained in the evidence directory.
 
@@ -55,6 +55,16 @@ IDs refer to the unchanged Phase 2 assessment at `/Users/jeffreycruz/Development
 Second-review additional warnings: stale-installed-app README flow → #4491; paired plist/overlay partial save and ignored delete-overlay failure → journaled recoverable transaction; conflicting DB2 index names → #4490; missing metadata default → serde default; off-screen restoration → monitor work-area fitting; Clipboard API rejection → tested fallback.
 
 Info findings: empty-log placeholder copying → actual content; extreme finite timestamp → validated date; null missing-health message → same handling as unknown. Milestone 1's prospective shared-log-parent race is tightened here by rejecting writable shared final parents and creating a private app log directory on future authorized startup. Runtime CLI timeout/cancellation/locality remains milestone 5 #4492 before any launch acceptance.
+
+## Gate correction
+
+The first push returned review-service error `large_diff_incomplete` with no findings. The brief's one infrastructure retry completed all five shards and BLOCKed on a new critical: invalid calendar integers could be lost before serialization and broaden a schedule. The bounded correction calls raw domain validation before every plist parse and tests malformed negative, overflowing, fractional and string minute values. A valid calendar round trip remains explicit; original UTF-8 XML comments are preserved.
+
+The same correction closes related M2 findings: delete captures the target by exclusive rename, validates the captured inode, restores competing entries, and fsyncs the directory before transaction commit; log-read IPC requires a listed owning plist and exact declared destination; port fallback compares parsed numeric ports; preference-backed controls wait for bootstrap; successful actions remain successful when refresh fails; suggested fixes cannot run concurrently; generated risk notes are displayed; manual ports reject invalid values and support explicit clears; a fresh successful probe for a running service supersedes historical exit status while stale success never does. Geometry chooses greatest monitor overlap; a successful clear resets its previous error. Focused negative/race tests cover these cases. The original-identity transaction fixture now uses the canonical caller path so its negative outcome proves replacement rejection rather than a spelling mismatch.
+
+Packaging warnings (stale README installed-app flow, destructive installer, stale DMG input, LSBackgroundOnly) remain #4491. DB2 corpus performance/ambiguous SQL warnings remain #4490 and are not validated claims. CopyableBlock's unhandled failure when both clipboard methods fail is a remaining info-level follow-up for #4490's upstream copy-command integration. Existing Radix missing-description and Vite chunk-size notices remain recorded. No installer or app has been launched to assess those surfaces.
+
+The corrective gate push is the last permitted correction attempt for this BLOCK. A further BLOCK or exhausted infrastructure retry stops work for orchestrator review; no gate bypass is authorized.
 
 ## Boundary
 

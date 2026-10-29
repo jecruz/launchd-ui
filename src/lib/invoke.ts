@@ -51,8 +51,8 @@ export type LogFileResult = {
   modified_at: string | null
 }
 
-export const readLogFile = (path: string, tailLines?: number) =>
-  invoke<LogFileResult>("read_log_file", { path, tailLines })
+export const readLogFile = (path: string, plistPath: string, tailLines?: number) =>
+  invoke<LogFileResult>("read_log_file", { path, plistPath, tailLines })
 
 /** Clear a log only after the backend binds it to its mutable user-agent plist. */
 export const clearLogFile = (path: string, plistPath: string) =>
