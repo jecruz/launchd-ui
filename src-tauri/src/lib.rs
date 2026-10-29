@@ -1,10 +1,12 @@
 mod agent_runtime;
 mod commands;
 mod error;
+mod health_probe;
 mod launchctl;
 mod plist_util;
 mod service_overlays;
 mod types;
+mod user_agent;
 
 use tauri::image::Image;
 use tauri::menu::{MenuBuilder, MenuItem};

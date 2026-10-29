@@ -546,13 +546,13 @@ export function JobDetail({ plistPath, open, onClose, onEdit, onRepair }: JobDet
                   {job.plist.standard_out_path && (
                     <div>
                       <h4 className="text-sm font-medium mb-2">Standard Output</h4>
-                      <LogViewer logPath={job.plist.standard_out_path} />
+                      <LogViewer logPath={job.plist.standard_out_path} plistPath={job.plist_path} readOnly={job.source !== "UserAgent"} />
                     </div>
                   )}
                   {job.plist.standard_error_path && (
                     <div>
                       <h4 className="text-sm font-medium mb-2">Standard Error</h4>
-                      <LogViewer logPath={job.plist.standard_error_path} />
+                      <LogViewer logPath={job.plist.standard_error_path} plistPath={job.plist_path} readOnly={job.source !== "UserAgent"} />
                     </div>
                   )}
                   {!job.plist.standard_out_path &&

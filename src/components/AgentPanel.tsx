@@ -341,13 +341,17 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
     [selectedJob, structuredResult]
   )
 
-  const applyStructuredAction = async (proposal: StructuredAgentResult) => {
+  const applyStructuredAction = async (proposal: StructuredAgentResult, automatic = false) => {
     if (!selectedJob || selectedJob.source !== "UserAgent") {
       setError("Only user agents can be mutated from the approved action path.")
       return
     }
     if (!proposal.command_proposal) {
       setError("No command proposal is available to apply.")
+      return
+    }
+    if (proposal.target !== selectedJob.label) {
+      setError("The proposal target no longer matches the selected job.")
       return
     }
     setError(null)
@@ -357,6 +361,7 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
         plist_path: selectedJob.plist_path,
         label: selectedJob.label,
         command_proposal: proposal.command_proposal,
+        auto_apply: automatic,
       })
       setAppliedAction(`${result.action}: ${result.command}`)
       setVerificationDetail({
@@ -699,7 +704,7 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
       setApprovalConfirmed(false)
       if (parsed && autoApplySafeActions && isSafeAutoApplyProposal(selectedJob, parsed)) {
         setApprovalConfirmed(true)
-        await applyStructuredAction(parsed)
+        await applyStructuredAction(parsed, true)
       }
     } catch (e) {
       setError(String(e))

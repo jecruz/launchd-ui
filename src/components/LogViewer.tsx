@@ -8,6 +8,8 @@ import { ExternalLink, RefreshCw, Trash2 } from "lucide-react"
 
 type LogViewerProps = {
   logPath: string | null
+  plistPath: string
+  readOnly?: boolean
   tailLines?: number
 }
 
@@ -20,7 +22,8 @@ function formatTime(date: Date): string {
   return `${month}/${day} ${h}:${m}:${s}`
 }
 
-export function LogViewer({ logPath, tailLines = 200 }: LogViewerProps) {
+/** Show a job's logs and allow clearing only for mutable user agents. */
+export function LogViewer({ logPath, plistPath, readOnly = false, tailLines = 200 }: LogViewerProps) {
   const { content, modifiedAt, loading, error, fetchLog } = useLogs()
 
   useEffect(() => {
@@ -66,9 +69,10 @@ export function LogViewer({ logPath, tailLines = 200 }: LogViewerProps) {
             variant="ghost"
             size="sm"
             onClick={async () => {
-              await clearLogFile(logPath)
+              await clearLogFile(logPath, plistPath)
               fetchLog(logPath, tailLines)
             }}
+            disabled={readOnly}
           >
             <Trash2 className="h-3 w-3 mr-1" />
             Clear

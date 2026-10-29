@@ -124,8 +124,11 @@ Semi-autonomous mode is deliberately conservative. When enabled, only safe user-
 ## Safety Notes
 
 - Arbitrary model-generated shell commands are never executed.
+- Health URLs must use HTTP(S) and loopback IPs or `localhost` (pinned to loopback). Native HTTP probes bypass proxies, reject redirects and URL credentials, share a five-second check budget, and read at most 64 KiB. Response bodies are never persisted.
 - System agents and daemons stay read-only in the UI and backend.
 - User-agent mutations require a `~/Library/LaunchAgents/*.plist` path.
+- Mutation targets must be regular owned files directly inside that directory, with matching filename, plist label, and request label. Traversal, symbolic links, and hardlinks are rejected. New labels use letters, digits, dots, underscores, and hyphens; creation cannot overwrite a file. Log directories must already exist.
+- Log clearing requires a validated user-agent plist declaring that exact log path; system-job logs are read-only. The backend independently restricts automatic actions to start/kickstart.
 - Semi-autonomous execution is opt-in and limited to safe user-agent start/kickstart proposals.
 - Enable and disable use `launchctl bootstrap` and `launchctl bootout` with the actual plist path.
 - Start, stop, restart, and kickstart use the current `gui/<uid>/<label>` target.

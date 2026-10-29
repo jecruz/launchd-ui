@@ -142,6 +142,7 @@ export type ApprovedAgentActionRequest = {
   plist_path: string
   label: string
   command_proposal: string
+  auto_apply: boolean
 }
 
 export type ApprovedAgentActionResult = {

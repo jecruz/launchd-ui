@@ -3,7 +3,9 @@ use crate::types::{CalendarInterval, JobSource, LaunchControlMetadata, PlistConf
 use plist::Value;
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::PathBuf;
 
 pub fn get_user_agents_dir() -> PathBuf {
     dirs::home_dir()
@@ -150,21 +152,26 @@ fn extract_launch_control_metadata(dict: &plist::Dictionary) -> LaunchControlMet
     }
 }
 
+/// Parse an on-disk plist using the same explicit-label contract as IPC edits.
 pub fn parse_plist(path: &str) -> Result<PlistConfig, AppError> {
-    let value = Value::from_file(path).map_err(|e| AppError::Plist(format!("{path}: {e}")))?;
+    parse_plist_bytes(&std::fs::read(path)?)
+}
+
+/// Parse a bounded caller-owned plist buffer without reopening its filesystem path.
+pub fn parse_plist_bytes(bytes: &[u8]) -> Result<PlistConfig, AppError> {
+    let value = Value::from_reader(Cursor::new(bytes))
+        .map_err(|e| AppError::Plist(format!("invalid plist: {e}")))?;
     let dict = value
         .as_dictionary()
-        .ok_or_else(|| AppError::Plist(format!("{path}: not a dictionary")))?;
+        .ok_or_else(|| AppError::Plist("plist is not a dictionary".into()))?;
 
-    let label = extract_string(dict, "Label").unwrap_or_else(|| {
-        Path::new(path)
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-    });
-
-    let raw_xml = read_raw_plist(path).unwrap_or_default();
+    let label = extract_string(dict, "Label")
+        .ok_or_else(|| AppError::Plist("plist requires an explicit Label".into()))?;
+    let mut raw_xml = Vec::new();
+    value
+        .to_writer_xml(&mut raw_xml)
+        .map_err(|e| AppError::Plist(format!("invalid plist: {e}")))?;
+    let raw_xml = String::from_utf8_lossy(&raw_xml).into_owned();
 
     Ok(PlistConfig {
         label,
@@ -185,26 +192,8 @@ pub fn parse_plist(path: &str) -> Result<PlistConfig, AppError> {
     })
 }
 
-pub fn read_raw_plist(path: &str) -> Result<String, AppError> {
-    // Try to read as XML first, fall back to converting binary plist
-    let data = std::fs::read(path)?;
-
-    // Check if it's already XML
-    if data.starts_with(b"<?xml") || data.starts_with(b"<") {
-        return Ok(String::from_utf8_lossy(&data).to_string());
-    }
-
-    // Binary plist: parse and re-serialize to XML
-    let value = Value::from_reader(Cursor::new(&data))
-        .map_err(|e| AppError::Plist(format!("failed to parse plist: {e}")))?;
-    let mut buf = Vec::new();
-    value
-        .to_writer_xml(&mut buf)
-        .map_err(|e| AppError::Plist(format!("failed to serialize plist to XML: {e}")))?;
-    Ok(String::from_utf8_lossy(&buf).to_string())
-}
-
-pub fn write_plist(path: &str, config: &PlistConfig) -> Result<(), AppError> {
+/// Serialize a launchd configuration before creating or replacing any file.
+pub fn serialize_plist(config: &PlistConfig) -> Result<Vec<u8>, AppError> {
     let mut dict = plist::Dictionary::new();
 
     dict.insert("Label".to_string(), Value::String(config.label.clone()));
@@ -391,10 +380,33 @@ pub fn write_plist(path: &str, config: &PlistConfig) -> Result<(), AppError> {
     }
 
     let value = Value::Dictionary(dict);
+    let mut bytes = Vec::new();
     value
-        .to_file_xml(path)
-        .map_err(|e| AppError::Plist(format!("failed to write plist: {e}")))?;
+        .to_writer_xml(&mut bytes)
+        .map_err(|e| AppError::Plist(format!("failed to serialize plist: {e}")))?;
+    Ok(bytes)
+}
 
+/// Write a validated plist configuration to its destination.
+pub fn write_plist(path: &str, config: &PlistConfig) -> Result<(), AppError> {
+    write_existing_plist(path, &serialize_plist(config)?)?;
+    Ok(())
+}
+
+fn write_existing_plist(path: &str, bytes: &[u8]) -> Result<(), AppError> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(AppError::Plist(
+            "Only regular, non-linked plists may be replaced.".into(),
+        ));
+    }
+    file.set_len(0)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -402,7 +414,7 @@ pub fn write_raw_plist(path: &str, xml: &str) -> Result<(), AppError> {
     // Validate by parsing
     Value::from_reader(Cursor::new(xml.as_bytes()))
         .map_err(|e| AppError::Plist(format!("invalid plist XML: {e}")))?;
-    std::fs::write(path, xml)?;
+    write_existing_plist(path, xml.as_bytes())?;
     Ok(())
 }
 

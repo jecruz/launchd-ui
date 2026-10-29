@@ -9,8 +9,8 @@ use crate::types::{
     ServiceRepairSuggestion,
 };
 use std::collections::HashMap;
-use std::path::Path;
-use std::process::Command;
+use std::io::Write;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 fn current_epoch_millis() -> String {
     let now = std::time::SystemTime::now();
@@ -96,16 +96,9 @@ fn get_last_run_at(config: &PlistConfig) -> Option<String> {
     latest.map(|ms| ms.to_string())
 }
 
+#[cfg(test)]
 fn ensure_user_agent(plist_path: &str) -> Result<(), AppError> {
-    let home = dirs::home_dir().unwrap_or_default();
-    let user_agents = home.join("Library/LaunchAgents");
-    if !plist_path.starts_with(user_agents.to_str().unwrap_or("")) {
-        return Err(AppError::Launchctl(
-            "Cannot start/stop system agents or daemons. Only user agents (~/Library/LaunchAgents) can be managed."
-                .to_string(),
-        ));
-    }
-    Ok(())
+    crate::user_agent::path(plist_path, false).map(|_| ())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -123,6 +116,8 @@ pub struct ApprovedAgentActionRequest {
     pub plist_path: String,
     pub label: String,
     pub command_proposal: String,
+    #[serde(default)]
+    pub auto_apply: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -135,6 +130,14 @@ pub struct ApprovedAgentActionResult {
 }
 
 fn classify_command_proposal(command_proposal: &str) -> Result<ApprovedAgentActionKind, AppError> {
+    if command_proposal
+        .chars()
+        .any(|c| matches!(c, ';' | '|' | '&' | '`' | '$' | '\n' | '\r' | '<' | '>'))
+    {
+        return Err(AppError::AgentRuntime(
+            "unsupported shell syntax in command proposal".into(),
+        ));
+    }
     let text = command_proposal.to_lowercase();
     let words: Vec<&str> = text
         .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
@@ -183,6 +186,23 @@ fn classify_command_proposal(command_proposal: &str) -> Result<ApprovedAgentActi
             "command proposal matched multiple launchd actions".to_string(),
         )),
     }
+}
+
+fn validate_execution_policy(
+    action: &ApprovedAgentActionKind,
+    auto_apply: bool,
+) -> Result<(), AppError> {
+    if auto_apply
+        && !matches!(
+            action,
+            ApprovedAgentActionKind::Start | ApprovedAgentActionKind::Kickstart
+        )
+    {
+        return Err(AppError::AgentRuntime(
+            "Automatic execution is limited to user-agent start and kickstart actions.".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn approved_action_command(
@@ -310,34 +330,6 @@ pub async fn get_job_detail(plist_path: String) -> Result<LaunchdJob, AppError> 
     })
 }
 
-fn probe_url(url: &str) -> Result<(bool, String), AppError> {
-    let output = Command::new("curl")
-        .args(["-fsS", "--max-time", "5", url])
-        .output()
-        .map_err(|e| AppError::AgentRuntime(format!("failed to run curl: {e}")))?;
-    if output.status.success() {
-        let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        return Ok((
-            true,
-            if response.is_empty() {
-                format!("GET {url} succeeded")
-            } else {
-                format!("GET {url} succeeded: {response}")
-            },
-        ));
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Ok((
-        false,
-        if stderr.is_empty() {
-            format!("GET {url} failed with status {}", output.status)
-        } else {
-            format!("GET {url} failed: {stderr}")
-        },
-    ))
-}
-
 fn candidate_health_urls(
     label: &str,
     plist: &PlistConfig,
@@ -374,6 +366,8 @@ fn run_health_check_command(
     plist: &PlistConfig,
     metadata: &crate::types::LaunchControlMetadata,
 ) -> Result<(String, String), AppError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let probe_url = |value: &str| crate::health_probe::probe_before(value, deadline);
     if let Some(url) = metadata.health_check_url.as_ref() {
         let (healthy, detail) = probe_url(url)?;
         if healthy {
@@ -683,28 +677,27 @@ fn suggest_repair(
 
 #[tauri::command]
 pub async fn start_job(plist_path: String) -> Result<(), AppError> {
-    ensure_user_agent(&plist_path)?;
-    // Unload first to avoid "already loaded" or stale state
-    let _ = launchctl::bootout(&plist_path);
+    let (plist_path, _) = crate::user_agent::load(&plist_path, None)?;
+    // Starting must not stop an already running job, including in auto-apply mode.
     launchctl::bootstrap(&plist_path)
 }
 
 #[tauri::command]
 pub async fn stop_job(plist_path: String) -> Result<(), AppError> {
-    ensure_user_agent(&plist_path)?;
+    let (plist_path, _) = crate::user_agent::load(&plist_path, None)?;
     launchctl::bootout(&plist_path)
 }
 
 #[tauri::command]
 pub async fn restart_job(plist_path: String) -> Result<(), AppError> {
-    ensure_user_agent(&plist_path)?;
+    let (plist_path, _) = crate::user_agent::load(&plist_path, None)?;
     let _ = launchctl::bootout(&plist_path);
     launchctl::bootstrap(&plist_path)
 }
 
 #[tauri::command]
 pub async fn kickstart_job(label: String, plist_path: String) -> Result<(), AppError> {
-    ensure_user_agent(&plist_path)?;
+    let (plist_path, _) = crate::user_agent::load(&plist_path, Some(&label))?;
     // Ensure the service is loaded before kickstarting
     let loaded = launchctl::list_loaded().unwrap_or_default();
     let is_loaded = loaded.iter().any(|s| s.label == label);
@@ -716,63 +709,75 @@ pub async fn kickstart_job(label: String, plist_path: String) -> Result<(), AppE
 
 #[tauri::command]
 pub async fn enable_job(label: String, plist_path: String) -> Result<(), AppError> {
-    ensure_user_agent(&plist_path)?;
+    crate::user_agent::load(&plist_path, Some(&label))?;
     launchctl::enable(&label)
 }
 
 #[tauri::command]
 pub async fn disable_job(label: String, plist_path: String) -> Result<(), AppError> {
-    ensure_user_agent(&plist_path)?;
+    crate::user_agent::load(&plist_path, Some(&label))?;
     launchctl::disable(&label)
 }
 
+/// Save an existing user agent without allowing the caller to change its identity.
 #[tauri::command]
 pub async fn save_job(plist_path: String, config: PlistConfig) -> Result<(), AppError> {
-    ensure_user_agent(&plist_path)?;
+    let (plist_path, _) = crate::user_agent::load(&plist_path, Some(&config.label))?;
     plist_util::write_plist(&plist_path, &config)?;
     service_overlays::upsert_service_override(&plist_path, &config.metadata)
 }
 
+/// Create a new user agent with a single safe label and exclusive file creation.
 #[tauri::command]
 pub async fn create_job(label: String, config: PlistConfig) -> Result<String, AppError> {
+    crate::user_agent::validate_label(&label)?;
+    if config.label != label {
+        return Err(AppError::Plist(
+            "Request and plist labels must match.".into(),
+        ));
+    }
     let agents_dir = plist_util::get_user_agents_dir();
-    if !agents_dir.exists() {
-        std::fs::create_dir_all(&agents_dir)?;
-    }
-    // Create log directories if log paths are set
-    for log_path in [&config.standard_out_path, &config.standard_error_path]
-        .into_iter()
-        .flatten()
-    {
-        if let Some(parent) = std::path::Path::new(log_path).parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-    }
-    let path = agents_dir.join(format!("{label}.plist"));
+    std::fs::create_dir_all(&agents_dir)?;
+    let target = agents_dir.join(format!("{label}.plist"));
+    let path = crate::user_agent::path(
+        target
+            .to_str()
+            .ok_or_else(|| AppError::Plist("invalid path".into()))?,
+        false,
+    )?;
+    let bytes = plist_util::serialize_plist(&config)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
     let path_str = path
         .to_str()
-        .ok_or_else(|| AppError::Plist("invalid path".to_string()))?
+        .ok_or_else(|| AppError::Plist("invalid path".into()))?
         .to_string();
-    plist_util::write_plist(&path_str, &config)?;
     service_overlays::upsert_service_override(&path_str, &config.metadata)?;
     Ok(path_str)
 }
 
+/// Save raw XML only when it retains the validated user agent's existing label.
 #[tauri::command]
 pub async fn save_raw_plist(plist_path: String, xml: String) -> Result<(), AppError> {
+    let (plist_path, config) = crate::user_agent::load(&plist_path, None)?;
+    crate::user_agent::validate_xml_label(&xml, &config.label)?;
     plist_util::write_raw_plist(&plist_path, &xml)
 }
 
+/// Delete only a validated user agent whose request label matches its plist.
 #[tauri::command]
 pub async fn delete_job(plist_path: String, label: String) -> Result<(), AppError> {
+    let (plist_path, _) = crate::user_agent::load(&plist_path, Some(&label))?;
     let _ = launchctl::bootout(&plist_path);
     let _ = launchctl::disable(&label);
-    if std::path::Path::new(&plist_path).exists() {
-        std::fs::remove_file(&plist_path)?;
-    }
-    let _ = service_overlays::remove_service_override(&plist_path);
+    std::fs::remove_file(&plist_path)?;
+    service_overlays::remove_service_override(&plist_path)?;
     Ok(())
 }
 
@@ -786,13 +791,25 @@ pub struct HealthCheckResult {
 #[tauri::command]
 pub async fn check_service_health(plist_path: String) -> Result<HealthCheckResult, AppError> {
     let job = get_job_detail(plist_path.clone()).await?;
-    let (status, detail) = run_health_check_command(&job.label, &job.plist, &job.plist.metadata)?;
+    let probe_job = job.clone();
+    let (status, detail) = tauri::async_runtime::spawn_blocking(move || {
+        run_health_check_command(
+            &probe_job.label,
+            &probe_job.plist,
+            &probe_job.plist.metadata,
+        )
+    })
+    .await
+    .map_err(|_| AppError::AgentRuntime("Health probe worker failed.".into()))??;
     let checked_at = current_epoch_millis();
     let mut updated_metadata = job.plist.metadata.clone();
     updated_metadata.health_status = Some(status.clone());
     updated_metadata.health_detail = Some(detail.clone());
     updated_metadata.last_health_check_at = Some(checked_at.clone());
-    service_overlays::upsert_service_override(&plist_path, &updated_metadata)?;
+    if job.source == crate::types::JobSource::UserAgent {
+        crate::user_agent::load(&plist_path, Some(&job.label))?;
+        service_overlays::upsert_service_override(&plist_path, &updated_metadata)?;
+    }
     Ok(HealthCheckResult {
         status,
         detail,
@@ -873,12 +890,33 @@ pub async fn read_log_file(
     })
 }
 
+/// Clear only a non-symlink log declared by a validated user-agent plist.
 #[tauri::command]
-pub async fn clear_log_file(path: String) -> Result<(), AppError> {
-    if !std::path::Path::new(&path).exists() {
-        return Err(AppError::NotFound(format!("log file not found: {path}")));
+pub async fn clear_log_file(path: String, plist_path: String) -> Result<(), AppError> {
+    let (_, config) = crate::user_agent::load(&plist_path, None)?;
+    clear_declared_log(&path, &config)
+}
+
+fn clear_declared_log(path: &str, config: &PlistConfig) -> Result<(), AppError> {
+    if ![&config.standard_out_path, &config.standard_error_path]
+        .iter()
+        .any(|candidate| candidate.as_deref() == Some(path))
+    {
+        return Err(AppError::Plist(
+            "Log is not declared by this user agent.".into(),
+        ));
     }
-    std::fs::write(&path, "")?;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(AppError::Plist(
+            "Only a regular unlinked log file can be cleared.".into(),
+        ));
+    }
+    file.set_len(0)?;
     Ok(())
 }
 
@@ -951,13 +989,10 @@ pub async fn get_agent_runtime_summary() -> Result<agent_runtime::AgentRuntimeSu
 pub async fn apply_approved_agent_action(
     request: ApprovedAgentActionRequest,
 ) -> Result<ApprovedAgentActionResult, AppError> {
-    ensure_user_agent(&request.plist_path)?;
-
-    if !Path::new(&request.plist_path).exists() {
-        return Err(AppError::NotFound(request.plist_path));
-    }
+    crate::user_agent::load(&request.plist_path, Some(&request.label))?;
 
     let action = classify_command_proposal(&request.command_proposal)?;
+    validate_execution_policy(&action, request.auto_apply)?;
     let command = match action {
         ApprovedAgentActionKind::Start => {
             start_job(request.plist_path.clone()).await?;
@@ -999,6 +1034,117 @@ pub async fn apply_approved_agent_action(
 mod tests {
     use super::*;
     use crate::types::JobSource;
+
+    fn security_test_config() -> PlistConfig {
+        serde_json::from_value(serde_json::json!({
+            "label": "com.example.security", "raw_xml": "", "metadata": {}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn every_job_mutation_rejects_system_targets_before_side_effects() {
+        let system = "/Library/LaunchDaemons/com.example.security.plist".to_string();
+        let config = security_test_config();
+        tauri::async_runtime::block_on(async {
+            assert!(start_job(system.clone()).await.is_err());
+            assert!(stop_job(system.clone()).await.is_err());
+            assert!(restart_job(system.clone()).await.is_err());
+            assert!(
+                kickstart_job(config.label.clone(), system.clone())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                enable_job(config.label.clone(), system.clone())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                disable_job(config.label.clone(), system.clone())
+                    .await
+                    .is_err()
+            );
+            assert!(save_job(system.clone(), config.clone()).await.is_err());
+            assert!(
+                save_raw_plist(system.clone(), "invalid".into())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                delete_job(system.clone(), config.label.clone())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                clear_log_file("/tmp/not-a-declared-log".into(), system.clone())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                apply_approved_agent_action(ApprovedAgentActionRequest {
+                    plist_path: system,
+                    label: config.label.clone(),
+                    command_proposal: "start".into(),
+                    auto_apply: true
+                })
+                .await
+                .is_err()
+            );
+            assert!(
+                create_job("../outside".into(), config.clone())
+                    .await
+                    .is_err()
+            );
+            assert!(create_job("other".into(), config).await.is_err());
+        });
+    }
+
+    #[test]
+    fn backend_auto_apply_policy_rejects_sensitive_actions_and_shell_chains() {
+        for action in [
+            ApprovedAgentActionKind::Stop,
+            ApprovedAgentActionKind::Restart,
+            ApprovedAgentActionKind::Enable,
+            ApprovedAgentActionKind::Disable,
+        ] {
+            assert!(validate_execution_policy(&action, true).is_err());
+            assert!(validate_execution_policy(&action, false).is_ok());
+        }
+        for action in [
+            ApprovedAgentActionKind::Start,
+            ApprovedAgentActionKind::Kickstart,
+        ] {
+            assert!(validate_execution_policy(&action, true).is_ok());
+        }
+        for proposal in [
+            "launchctl start job; touch /tmp/other",
+            "launchctl kickstart job | sh",
+            "launchctl start $(other)",
+            "launchctl start job\nlaunchctl disable job",
+        ] {
+            assert!(classify_command_proposal(proposal).is_err());
+        }
+    }
+
+    #[test]
+    fn clear_log_requires_a_declared_regular_nonlinked_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("stdout.log");
+        let other = directory.path().join("other.log");
+        std::fs::write(&log, "log data").unwrap();
+        std::fs::write(&other, "preserve").unwrap();
+        let mut config = security_test_config();
+        config.standard_out_path = Some(log.to_str().unwrap().into());
+        assert!(clear_declared_log(other.to_str().unwrap(), &config).is_err());
+        let linked = directory.path().join("linked.log");
+        std::os::unix::fs::symlink(&other, &linked).unwrap();
+        config.standard_error_path = Some(linked.to_str().unwrap().into());
+        assert!(clear_declared_log(linked.to_str().unwrap(), &config).is_err());
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "preserve");
+        clear_declared_log(log.to_str().unwrap(), &config).unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
+    }
 
     #[test]
     fn health_check_rejects_shell_commands_without_executing_them() {

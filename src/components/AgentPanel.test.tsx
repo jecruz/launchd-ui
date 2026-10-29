@@ -34,17 +34,17 @@ const selectedJob: JobListEntry = {
   },
 }
 
-function installProposalHandlers(job: JobListEntry) {
+function installProposalHandlers(job: JobListEntry, command = `launchctl kickstart -k gui/501/${job.label}`, target = job.label) {
   setFakeHandler("run_agent_prompt", () => ({
     response: JSON.stringify({
       mode: "approval",
       action: "proposal",
-      target: job.label,
+      target,
       summary: "Kickstart the selected job.",
       risks: [],
       recommended_next_step: "Apply the approved action.",
       approval_required: true,
-      command_proposal: `launchctl kickstart -k gui/501/${job.label}`,
+      command_proposal: command,
       verification: ["Refresh the job list"],
     }),
     command_line: "mock-runner --prompt",
@@ -216,6 +216,38 @@ describe("AgentPanel timeline", () => {
     ).toBeInTheDocument()
     expect(screen.getByText("Choose a local provider")).toBeInTheDocument()
     expect(screen.getByText("Run the prompt")).toBeInTheDocument()
+  })
+
+  it.each(["stop", "restart", "disable", "enable", "bootout"])(
+    "requires manual review for a semi-autonomous %s proposal",
+    async (action) => {
+      const user = userEvent.setup()
+      const apply = vi.fn()
+      installProposalHandlers(selectedJob, `launchctl ${action} gui/501/${selectedJob.label}`)
+      setFakeHandler("apply_approved_agent_action", apply)
+      render(<AgentPanel mode="approval" selectedJob={selectedJob} onApplied={vi.fn()} />)
+      await screen.findByText("0/5 stages complete")
+      await user.click(screen.getByRole("checkbox", { name: /Semi-autonomous mode/i }))
+      await user.click(screen.getByText("Propose command").closest("button")!)
+      await user.click(screen.getByRole("button", { name: "Run Prompt" }))
+      await screen.findAllByText("Kickstart the selected job.")
+      expect(approvalCheckbox()).not.toBeChecked()
+      expect(apply).not.toHaveBeenCalled()
+    }
+  )
+
+  it("rejects an automatic proposal naming a different job", async () => {
+    const user = userEvent.setup()
+    const apply = vi.fn()
+    installProposalHandlers(selectedJob, `launchctl kickstart -k gui/501/${selectedJob.label}`, "other.job")
+    setFakeHandler("apply_approved_agent_action", apply)
+    render(<AgentPanel mode="approval" selectedJob={selectedJob} onApplied={vi.fn()} />)
+    await screen.findByText("0/5 stages complete")
+    await user.click(screen.getByRole("checkbox", { name: /Semi-autonomous mode/i }))
+    await user.click(screen.getByText("Propose command").closest("button")!)
+    await user.click(screen.getByRole("button", { name: "Run Prompt" }))
+    await screen.findByText("The proposal target no longer matches the selected job.")
+    expect(apply).not.toHaveBeenCalled()
   })
 
   it("auto-applies safe user-agent proposals when semi-autonomous mode is enabled", async () => {
