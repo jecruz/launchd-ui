@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { listen } from "@tauri-apps/api/event"
 import { hide as hideApp, show as showApp, setDockVisibility } from "@tauri-apps/api/app"
 import { getCurrentWindow, PhysicalPosition, PhysicalSize, availableMonitors } from "@tauri-apps/api/window"
-import { ArrowUpRight, Bot, Layers3, Plus, RefreshCw, Shield, Sparkles, TerminalSquare, Activity } from "lucide-react"
+import { ArrowUpRight, Bot, Layers3, Plus, RefreshCw, Shield, Sparkles, TerminalSquare, Activity, Monitor, Moon, Sun } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -24,6 +24,7 @@ import {
 import { JobList } from "@/components/JobList"
 import { SearchBar } from "@/components/SearchBar"
 import { AgentPanel } from "@/components/AgentPanel"
+import { useTheme } from "@/hooks/useTheme"
 import { useJobs } from "@/hooks/useJobs"
 import { deriveHealthText } from "@/lib/health"
 import {
@@ -97,7 +98,7 @@ const MIN_WINDOW_HEIGHT = 940
 function ModeBadge({ mode }: { mode: AgentMode }) {
   const card = modeCards.find((item) => item.id === mode)!
   return (
-    <Badge className="border-white/10 bg-white/5 text-slate-100 hover:bg-white/5">
+    <Badge className="border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 text-foreground dark:text-slate-100 hover:bg-white/5">
       {card.title}
     </Badge>
   )
@@ -152,6 +153,9 @@ function sameWindowGeometry(
 }
 
 function App() {
+  const { theme, cycle } = useTheme()
+  const ThemeIcon = theme === "dark" ? Moon : theme === "light" ? Sun : Monitor
+
   const [preferences, setPreferences] = useState<AppPreferences>(defaultPreferences)
   const [preferencesReady, setPreferencesReady] = useState(false)
   const [preferencesWritable, setPreferencesWritable] = useState(false)
@@ -304,8 +308,6 @@ function App() {
   }, [])
 
   useEffect(() => {
-    document.documentElement.classList.add("dark")
-
     const currentWindow = getCurrentWindow()
     let unlistenCommand: (() => void) | undefined
     let unlistenClose: (() => void) | undefined
@@ -553,28 +555,28 @@ function App() {
   if (!preferencesReady) return <div role="status">Loading saved preferences...</div>
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(45,212,191,0.16),_transparent_34%),radial-gradient(circle_at_top_right,_rgba(59,130,246,0.14),_transparent_28%),linear-gradient(180deg,_#020617_0%,_#0f172a_100%)] text-foreground">
+    <div className="relative min-h-screen overflow-hidden bg-background dark:bg-[radial-gradient(circle_at_top_left,_rgba(45,212,191,0.16),_transparent_34%),radial-gradient(circle_at_top_right,_rgba(59,130,246,0.14),_transparent_28%),linear-gradient(180deg,_#020617_0%,_#0f172a_100%)] text-foreground">
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(148,163,184,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.05)_1px,transparent_1px)] bg-[size:24px_24px] [mask-image:linear-gradient(180deg,rgba(0,0,0,0.55),transparent_88%)]" />
 
       <div className="relative mx-auto flex min-h-screen max-w-7xl flex-col px-4 py-4 sm:px-6 lg:px-8">
-        <header className="rounded-3xl border border-white/10 bg-slate-950/70 px-5 py-4 shadow-2xl shadow-black/30 backdrop-blur-xl">
+        <header className="rounded-3xl border border-border dark:border-white/10 bg-background/90 dark:bg-slate-950/70 px-5 py-4 shadow-2xl shadow-black/30 backdrop-blur-xl">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div className="space-y-3">
               <div className="flex flex-wrap items-center gap-2">
-                <Badge className="border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/10">
+                <Badge className="border-emerald-400/30 bg-emerald-400/10 text-emerald-700 dark:text-emerald-200 hover:bg-emerald-400/10">
                   Menu bar
                 </Badge>
-                <Badge variant="outline" className="border-white/10 text-slate-300">
+                <Badge variant="outline" className="border-border dark:border-white/10 text-foreground dark:text-slate-300">
                   macOS services
                 </Badge>
                 <ModeBadge mode={agentMode} />
               </div>
 
               <div>
-                <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+                <h1 className="text-3xl font-semibold tracking-tight text-foreground dark:text-white sm:text-4xl">
                   Daemonic
                 </h1>
-                <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-300">
+                <p className="mt-2 max-w-3xl text-sm leading-6 text-foreground dark:text-slate-300">
                   Daemonic — Master Your macOS Services. A tray-first macOS control
                   center for launchd jobs with agent-driven workflows, local reasoning
                   hooks, and a deterministic launchctl executor under the hood.
@@ -586,15 +588,18 @@ function App() {
               <Button
                 variant="outline"
                 size="sm"
-                className="border-white/10 bg-white/5 text-slate-100 hover:bg-white/10"
+                className="border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 text-foreground dark:text-slate-100 hover:bg-white/10"
                 onClick={openControlCenter}
               >
                 Open Panel
               </Button>
+              <Button variant="outline" size="icon" onClick={cycle} aria-label={`Theme: ${theme}`} title={`Theme: ${theme}`}>
+                <ThemeIcon className="h-4 w-4" />
+              </Button>
               <Button
                 variant="outline"
                 size="sm"
-                className="border-white/10 bg-white/5 text-slate-100 hover:bg-white/10"
+                className="border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 text-foreground dark:text-slate-100 hover:bg-white/10"
                 onClick={refresh}
               >
                 <RefreshCw className="mr-2 h-4 w-4" />
@@ -619,76 +624,76 @@ function App() {
 
         <main className="mt-4 flex flex-1 flex-col gap-4">
           <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <div className="rounded-3xl border border-white/10 bg-slate-900/70 p-4 shadow-lg shadow-black/20 backdrop-blur-xl">
+            <div className="rounded-3xl border border-border dark:border-white/10 bg-card dark:bg-slate-900/70 p-4 shadow-lg shadow-black/20 backdrop-blur-xl">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+                  <p className="text-xs uppercase tracking-[0.24em] text-muted-foreground dark:text-slate-400">
                     Active
                   </p>
-                  <div className="mt-2 text-3xl font-semibold text-white">
+                  <div className="mt-2 text-3xl font-semibold text-foreground dark:text-white">
                     {runningCount}
                   </div>
                 </div>
-                <div className="rounded-2xl bg-emerald-500/15 p-3 text-emerald-300">
+                <div className="rounded-2xl bg-emerald-500/15 p-3 text-emerald-700 dark:text-emerald-300">
                   <Activity className="h-5 w-5" />
                 </div>
               </div>
-              <p className="mt-3 text-sm text-slate-400">Jobs with a live PID.</p>
+              <p className="mt-3 text-sm text-muted-foreground dark:text-slate-400">Jobs with a live PID.</p>
             </div>
 
-            <div className="rounded-3xl border border-white/10 bg-slate-900/70 p-4 shadow-lg shadow-black/20 backdrop-blur-xl">
+            <div className="rounded-3xl border border-border dark:border-white/10 bg-card dark:bg-slate-900/70 p-4 shadow-lg shadow-black/20 backdrop-blur-xl">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+                  <p className="text-xs uppercase tracking-[0.24em] text-muted-foreground dark:text-slate-400">
                     Loaded
                   </p>
-                  <div className="mt-2 text-3xl font-semibold text-white">
+                  <div className="mt-2 text-3xl font-semibold text-foreground dark:text-white">
                     {loadedCount}
                   </div>
                 </div>
-                <div className="rounded-2xl bg-sky-500/15 p-3 text-sky-300">
+                <div className="rounded-2xl bg-sky-500/15 p-3 text-sky-700 dark:text-sky-300">
                   <Layers3 className="h-5 w-5" />
                 </div>
               </div>
-              <p className="mt-3 text-sm text-slate-400">
+              <p className="mt-3 text-sm text-muted-foreground dark:text-slate-400">
                 Registered with launchd but not running.
               </p>
             </div>
 
-            <div className="rounded-3xl border border-white/10 bg-slate-900/70 p-4 shadow-lg shadow-black/20 backdrop-blur-xl">
-              <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+            <div className="rounded-3xl border border-border dark:border-white/10 bg-card dark:bg-slate-900/70 p-4 shadow-lg shadow-black/20 backdrop-blur-xl">
+              <p className="text-xs uppercase tracking-[0.24em] text-muted-foreground dark:text-slate-400">
                 User Agents
               </p>
-              <div className="mt-2 text-3xl font-semibold text-white">
+              <div className="mt-2 text-3xl font-semibold text-foreground dark:text-white">
                 {userAgentCount}
               </div>
-              <p className="mt-3 text-sm text-slate-400">
+              <p className="mt-3 text-sm text-muted-foreground dark:text-slate-400">
                 Mutable jobs are controlled directly from the app.
               </p>
             </div>
 
-            <div className="rounded-3xl border border-white/10 bg-slate-900/70 p-4 shadow-lg shadow-black/20 backdrop-blur-xl">
-              <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+            <div className="rounded-3xl border border-border dark:border-white/10 bg-card dark:bg-slate-900/70 p-4 shadow-lg shadow-black/20 backdrop-blur-xl">
+              <p className="text-xs uppercase tracking-[0.24em] text-muted-foreground dark:text-slate-400">
                 Agent posture
               </p>
-              <div className="mt-2 flex items-center gap-2 text-lg font-medium text-white">
-                <Sparkles className="h-4 w-4 text-amber-300" />
+              <div className="mt-2 flex items-center gap-2 text-lg font-medium text-foreground dark:text-white">
+                <Sparkles className="h-4 w-4 text-amber-700 dark:text-amber-300" />
                 {modeCard.title}
               </div>
-              <p className="mt-3 text-sm text-slate-400">{modeCard.eyebrow}</p>
+              <p className="mt-3 text-sm text-muted-foreground dark:text-slate-400">{modeCard.eyebrow}</p>
             </div>
           </section>
 
           {(error || actionError || preferenceError) && (
             <div className="space-y-2">
               {error && (
-                <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200 shadow-lg shadow-rose-950/20">
+                <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-700 dark:text-rose-200 shadow-lg shadow-rose-950/20">
                   {error}
                 </div>
               )}
               {preferenceError && <p role="alert">{preferenceError} <Button onClick={() => { if (preferencesWritable) void preferenceWriter.flush().catch(() => undefined); else if (window.confirm("Reload saved preferences and replace this session's in-memory preference edits?")) setReloadPreferences((value) => value + 1) }}>{preferencesWritable ? "Retry pending save" : "Reload saved preferences"}</Button></p>}
               {actionError && (
-                <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200 shadow-lg shadow-rose-950/20">
+                <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-700 dark:text-rose-200 shadow-lg shadow-rose-950/20">
                   {actionError}
                 </div>
               )}
@@ -696,14 +701,14 @@ function App() {
           )}
 
           <section className="grid flex-1 gap-4 2xl:grid-cols-[minmax(0,1.75fr)_minmax(320px,0.95fr)]">
-            <div className="min-w-0 overflow-hidden rounded-3xl border border-white/10 bg-slate-950/70 shadow-2xl shadow-black/30 backdrop-blur-xl">
-              <div className="border-b border-white/10 px-5 py-4">
+            <div className="min-w-0 overflow-hidden rounded-3xl border border-border dark:border-white/10 bg-background/90 dark:bg-slate-950/70 shadow-2xl shadow-black/30 backdrop-blur-xl">
+              <div className="border-b border-border dark:border-white/10 px-5 py-4">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                   <div>
-                    <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+                    <p className="text-xs uppercase tracking-[0.24em] text-muted-foreground dark:text-slate-400">
                       Jobs
                     </p>
-                    <h2 className="mt-1 text-lg font-semibold text-white">
+                    <h2 className="mt-1 text-lg font-semibold text-foreground dark:text-white">
                       Launchd jobs and agents
                     </h2>
                   </div>
@@ -740,35 +745,35 @@ function App() {
                           "rounded-2xl border p-3 text-left transition",
                           groupFilter === summary.group
                             ? "border-emerald-400/50 bg-emerald-400/10"
-                            : "border-white/10 bg-white/5 hover:bg-white/10",
+                            : "border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 hover:bg-white/10",
                         ].join(" ")}
                       >
                         <div className="flex items-center justify-between gap-3">
                           <div className="min-w-0">
-                            <div className="truncate text-sm font-medium text-white">
+                            <div className="truncate text-sm font-medium text-foreground dark:text-white">
                               {summary.group}
                             </div>
-                            <div className="mt-1 text-xs text-slate-400">
+                            <div className="mt-1 text-xs text-muted-foreground dark:text-slate-400">
                               {summary.total} services
                             </div>
                           </div>
                           {summary.attention > 0 && (
-                            <Badge className="border-rose-400/30 bg-rose-400/10 text-rose-100 hover:bg-rose-400/10">
+                            <Badge className="border-rose-400/30 bg-rose-400/10 text-rose-700 dark:text-rose-100 hover:bg-rose-400/10">
                               {summary.attention} attention
                             </Badge>
                           )}
                         </div>
-                        <div className="mt-3 grid grid-cols-3 gap-2 text-xs text-slate-300">
+                        <div className="mt-3 grid grid-cols-3 gap-2 text-xs text-foreground dark:text-slate-300">
                           <div>
-                            <div className="font-medium text-white">{summary.running}</div>
+                            <div className="font-medium text-foreground dark:text-white">{summary.running}</div>
                             <div>Running</div>
                           </div>
                           <div>
-                            <div className="font-medium text-white">{summary.logCoverage}</div>
+                            <div className="font-medium text-foreground dark:text-white">{summary.logCoverage}</div>
                             <div>Logged</div>
                           </div>
                           <div>
-                            <div className="font-medium text-white">
+                            <div className="font-medium text-foreground dark:text-white">
                               {Math.round((summary.logCoverage / summary.total) * 100)}%
                             </div>
                             <div>Coverage</div>
@@ -779,7 +784,7 @@ function App() {
                             type="button"
                             size="sm"
                             variant="outline"
-                            className="h-8 border-white/10 bg-white/5 text-xs text-slate-100 hover:bg-white/10"
+                            className="h-8 border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 text-xs text-foreground dark:text-slate-100 hover:bg-white/10"
                             onClick={(event) => {
                               event.stopPropagation()
                               void handleBulkGroupAction(summary.group, "kickstart")
@@ -792,7 +797,7 @@ function App() {
                             type="button"
                             size="sm"
                             variant="outline"
-                            className="h-8 border-white/10 bg-white/5 text-xs text-slate-100 hover:bg-white/10"
+                            className="h-8 border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 text-xs text-foreground dark:text-slate-100 hover:bg-white/10"
                             onClick={(event) => {
                               event.stopPropagation()
                               void handleBulkGroupAction(summary.group, "start")
@@ -805,7 +810,7 @@ function App() {
                             type="button"
                             size="sm"
                             variant="outline"
-                            className="h-8 border-white/10 bg-white/5 text-xs text-slate-100 hover:bg-white/10"
+                            className="h-8 border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 text-xs text-foreground dark:text-slate-100 hover:bg-white/10"
                             onClick={(event) => {
                               event.stopPropagation()
                               void handleBulkGroupAction(summary.group, "stop")
@@ -818,7 +823,7 @@ function App() {
                             type="button"
                             size="sm"
                             variant="outline"
-                            className="h-8 border-white/10 bg-white/5 text-xs text-slate-100 hover:bg-white/10"
+                            className="h-8 border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 text-xs text-foreground dark:text-slate-100 hover:bg-white/10"
                             onClick={(event) => {
                               event.stopPropagation()
                               void handleBulkGroupAction(summary.group, "restart")
@@ -843,14 +848,14 @@ function App() {
                         "rounded-2xl border p-3 text-left transition",
                         agentMode === mode.id
                           ? "border-emerald-400/50 bg-emerald-400/10"
-                          : "border-white/10 bg-white/5 hover:bg-white/10",
+                          : "border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 hover:bg-white/10",
                       ].join(" ")}
                     >
-                      <div className="text-xs uppercase tracking-[0.24em] text-slate-400">
+                      <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground dark:text-slate-400">
                         {mode.eyebrow}
                       </div>
-                      <div className="mt-1 font-medium text-white">{mode.title}</div>
-                      <p className="mt-2 text-sm leading-5 text-slate-300">
+                      <div className="mt-1 font-medium text-foreground dark:text-white">{mode.title}</div>
+                      <p className="mt-2 text-sm leading-5 text-foreground dark:text-slate-300">
                         {mode.description}
                       </p>
                     </button>
@@ -878,20 +883,20 @@ function App() {
             </div>
 
             <aside className="space-y-4">
-              <div className="rounded-3xl border border-white/10 bg-slate-900/70 p-5 shadow-2xl shadow-black/30 backdrop-blur-xl">
+              <div className="rounded-3xl border border-border dark:border-white/10 bg-card dark:bg-slate-900/70 p-5 shadow-2xl shadow-black/30 backdrop-blur-xl">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+                    <p className="text-xs uppercase tracking-[0.24em] text-muted-foreground dark:text-slate-400">
                       Focus
                     </p>
-                    <h3 className="mt-1 text-lg font-semibold text-white">
+                    <h3 className="mt-1 text-lg font-semibold text-foreground dark:text-white">
                       {selectedJob ? selectedJob.label : "Select a job"}
                     </h3>
                   </div>
                   {selectedJob && (
                     <Badge
                       variant="outline"
-                      className="border-white/10 bg-white/5 text-slate-200"
+                      className="border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 text-foreground dark:text-slate-200"
                     >
                       {selectedJob.source === "UserAgent" ? "User" : "Read-only"}
                     </Badge>
@@ -901,37 +906,37 @@ function App() {
                 {selectedJob ? (
                   <div className="mt-4 space-y-4">
                     <div className="grid grid-cols-2 gap-3">
-                      <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-400">
+                      <div className="rounded-2xl border border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 p-3">
+                        <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground dark:text-slate-400">
                           Status
                         </p>
-                        <p className="mt-1 text-base font-medium text-white">
+                        <p className="mt-1 text-base font-medium text-foreground dark:text-white">
                           {selectedJob.status}
                         </p>
                       </div>
-                      <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                        <p className="text-xs uppercase tracking-[0.2em] text-slate-400">
+                      <div className="rounded-2xl border border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 p-3">
+                        <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground dark:text-slate-400">
                           PID
                         </p>
-                        <p className="mt-1 text-base font-medium text-white">
+                        <p className="mt-1 text-base font-medium text-foreground dark:text-white">
                           {selectedJob.pid ?? "—"}
                         </p>
                       </div>
                     </div>
 
-                    <div className="rounded-2xl border border-white/10 bg-white/5 p-3 text-sm text-slate-300">
+                    <div className="rounded-2xl border border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 p-3 text-sm text-foreground dark:text-slate-300">
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-slate-400">Path</span>
+                        <span className="text-muted-foreground dark:text-slate-400">Path</span>
                         <button
                           type="button"
-                          className="inline-flex items-center gap-1 text-xs text-cyan-300 hover:text-cyan-200"
+                          className="inline-flex items-center gap-1 text-xs text-cyan-700 dark:text-cyan-300 hover:text-cyan-200"
                           onClick={() => revealInFinder(selectedJob.plist_path)}
                         >
                           Reveal
                           <ArrowUpRight className="h-3.5 w-3.5" />
                         </button>
                       </div>
-                      <p className="mt-2 break-all font-mono text-xs text-slate-200">
+                      <p className="mt-2 break-all font-mono text-xs text-foreground dark:text-slate-200">
                         {selectedJob.plist_path}
                       </p>
                     </div>
@@ -940,7 +945,7 @@ function App() {
                       <Button
                         size="sm"
                         variant="outline"
-                        className="border-white/10 bg-white/5 text-slate-100 hover:bg-white/10"
+                        className="border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 text-foreground dark:text-slate-100 hover:bg-white/10"
                         onClick={() => handleSelect(selectedJob)}
                       >
                         Open Details
@@ -948,41 +953,41 @@ function App() {
                       <Button
                         size="sm"
                         variant="outline"
-                        className="border-white/10 bg-white/5 text-slate-100 hover:bg-white/10"
+                        className="border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 text-foreground dark:text-slate-100 hover:bg-white/10"
                         onClick={() => handleAction(() => kickstartJob(selectedJob.label, selectedJob.plist_path))}
                       >
                         Test Run
                       </Button>
                     </div>
 
-                    <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-3 text-sm text-emerald-100">
+                    <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-100">
                       {selectedJob.source === "UserAgent"
                         ? "This job is user-owned, so start, stop, restart, and delete actions are available."
                         : "This job is system-owned. The UI remains read-only and only exposes inspection actions."}
                     </div>
                   </div>
                 ) : (
-                  <div className="mt-4 rounded-2xl border border-dashed border-white/10 bg-white/5 p-4 text-sm text-slate-300">
+                  <div className="mt-4 rounded-2xl border border-dashed border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 p-4 text-sm text-foreground dark:text-slate-300">
                     Pick a job from the list to surface its plist, status, and quick
                     actions here.
                   </div>
                 )}
               </div>
 
-              <div className="rounded-3xl border border-white/10 bg-slate-900/70 p-5 shadow-2xl shadow-black/30 backdrop-blur-xl">
-                <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+              <div className="rounded-3xl border border-border dark:border-white/10 bg-card dark:bg-slate-900/70 p-5 shadow-2xl shadow-black/30 backdrop-blur-xl">
+                <p className="text-xs uppercase tracking-[0.24em] text-muted-foreground dark:text-slate-400">
                   Local model slot
                 </p>
-                <div className="mt-3 flex items-center gap-2 text-white">
-                  <Bot className="h-4 w-4 text-cyan-300" />
+                <div className="mt-3 flex items-center gap-2 text-foreground dark:text-white">
+                  <Bot className="h-4 w-4 text-cyan-700 dark:text-cyan-300" />
                   <span className="font-medium">Lightweight embedded model</span>
                 </div>
-                <p className="mt-3 text-sm leading-6 text-slate-300">
+                <p className="mt-3 text-sm leading-6 text-foreground dark:text-slate-300">
                   The UI is structured for an on-device model that can summarize
                   launchd state, classify user requests, and drive the three agent
                   modes without shipping job data off the machine.
                 </p>
-                <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-3 text-sm text-slate-300">
+                <div className="mt-4 rounded-2xl border border-border dark:border-white/10 bg-muted/50 dark:bg-white/5 p-3 text-sm text-foreground dark:text-slate-300">
                   Planned flow: prompt bar, local inference, intent extraction, and
                   approval-aware execution.
                 </div>
@@ -990,21 +995,21 @@ function App() {
 
               <AgentPanel mode={agentMode} selectedJob={selectedJob} onApplied={refresh} />
 
-              <div className="rounded-3xl border border-white/10 bg-slate-900/70 p-5 shadow-2xl shadow-black/30 backdrop-blur-xl">
-                <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+              <div className="rounded-3xl border border-border dark:border-white/10 bg-card dark:bg-slate-900/70 p-5 shadow-2xl shadow-black/30 backdrop-blur-xl">
+                <p className="text-xs uppercase tracking-[0.24em] text-muted-foreground dark:text-slate-400">
                   Operating model
                 </p>
-                <ul className="mt-4 space-y-3 text-sm text-slate-300">
+                <ul className="mt-4 space-y-3 text-sm text-foreground dark:text-slate-300">
                   <li className="flex items-start gap-3">
-                    <Shield className="mt-0.5 h-4 w-4 text-emerald-300" />
+                    <Shield className="mt-0.5 h-4 w-4 text-emerald-700 dark:text-emerald-300" />
                     User agents are the only mutable target. System launch agents and daemons stay read-only.
                   </li>
                   <li className="flex items-start gap-3">
-                    <TerminalSquare className="mt-0.5 h-4 w-4 text-sky-300" />
+                    <TerminalSquare className="mt-0.5 h-4 w-4 text-sky-700 dark:text-sky-300" />
                     launchctl remains the deterministic executor. The agent only proposes or orchestrates.
                   </li>
                   <li className="flex items-start gap-3">
-                    <Sparkles className="mt-0.5 h-4 w-4 text-amber-300" />
+                    <Sparkles className="mt-0.5 h-4 w-4 text-amber-700 dark:text-amber-300" />
                     The tray icon owns open, refresh, and new-agent shortcuts for a real menu bar workflow.
                   </li>
                 </ul>

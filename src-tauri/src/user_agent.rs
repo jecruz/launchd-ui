@@ -215,10 +215,10 @@ fn atomic_publish(
                 swap()?;
                 if let Ok(actual) = open_at(directory, &name, libc::O_RDONLY)
                     .and_then(|file| file.metadata().map_err(Into::into))
+                    && actual.dev() == candidate.dev()
+                    && actual.ino() == candidate.ino()
                 {
-                    if actual.dev() == candidate.dev() && actual.ino() == candidate.ino() {
-                        cleanup = Some(actual);
-                    }
+                    cleanup = Some(actual);
                 }
                 directory.sync_all()?;
                 return Err(AppError::Plist("Concurrent plist replacement rejected; any conflicting temporary entry is retained for operator review.".into()));
@@ -246,16 +246,14 @@ fn atomic_publish(
         directory.sync_all()?;
         Ok(())
     })();
-    if let Some(identity) = cleanup {
-        if let Ok(current) = open_at(directory, &name, libc::O_RDONLY)
+    if let Some(identity) = cleanup
+        && let Ok(current) = open_at(directory, &name, libc::O_RDONLY)
             .and_then(|file| file.metadata().map_err(Into::into))
-        {
-            if same_moved_file(&identity, &current) {
-                // SAFETY: only the validated private temporary entry is removed.
-                unsafe {
-                    libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0);
-                }
-            }
+        && same_moved_file(&identity, &current)
+    {
+        // SAFETY: only the validated private temporary entry is removed.
+        unsafe {
+            libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0);
         }
     }
     result
@@ -527,10 +525,10 @@ pub fn validate_log_parents(config: &PlistConfig) -> Result<(), AppError> {
                 return Err(rejected());
             }
         }
-        if let Ok(metadata) = std::fs::symlink_metadata(path) {
-            if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.nlink() != 1 {
-                return Err(rejected());
-            }
+        if let Ok(metadata) = std::fs::symlink_metadata(path)
+            && (!metadata.is_file() || metadata.file_type().is_symlink() || metadata.nlink() != 1)
+        {
+            return Err(rejected());
         }
     }
     Ok(())

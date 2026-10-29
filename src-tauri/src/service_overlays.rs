@@ -192,12 +192,12 @@ fn transact_at(
                     .original_bytes()?,
             )
         };
-        if let Some(after) = after {
-            if plist_util::parse_plist_bytes(after)?.label != label {
-                return Err(AppError::Plist(
-                    "Replacement label must match its target.".into(),
-                ));
-            }
+        if let Some(after) = after
+            && plist_util::parse_plist_bytes(after)?.label != label
+        {
+            return Err(AppError::Plist(
+                "Replacement label must match its target.".into(),
+            ));
         }
         let overrides = load_at(directory, legacy)?;
         let journal = Journal {

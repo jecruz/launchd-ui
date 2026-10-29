@@ -1,13 +1,13 @@
 {
   "name": "daemonic",
   "private": true,
-  "version": "1.2.1",
+  "version": "1.4.2",
   "packageManager": "pnpm@10.28.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "oxlint src/",
+    "lint": "oxlint src/ scripts/",
     "typecheck": "tsc -b",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -18,13 +18,15 @@
     "package:macos:install": "pnpm tauri:build && pnpm install:macos",
     "package:macos:dmg": "bash scripts/package-macos-dmg.sh",
     "preview": "vite preview",
-    "version:patch": "node scripts/bump-version.ts patch && git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock && git commit -m \"chore: bump version to $(node -p \"require('./package.json').version\")\" && git tag v$(node -p \"require('./package.json').version\")",
-    "version:minor": "node scripts/bump-version.ts minor && git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock && git commit -m \"chore: bump version to $(node -p \"require('./package.json').version\")\" && git tag v$(node -p \"require('./package.json').version\")",
-    "version:major": "node scripts/bump-version.ts major && git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock && git commit -m \"chore: bump version to $(node -p \"require('./package.json').version\")\" && git tag v$(node -p \"require('./package.json').version\")"
+    "version:patch": "node scripts/bump-version.ts patch",
+    "version:minor": "node scripts/bump-version.ts minor",
+    "version:major": "node scripts/bump-version.ts major",
+    "test:release": "node --test scripts/*.test.ts",
+    "version:check": "node scripts/check-version.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.18",
-    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/api": "^2.11.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.564.0",

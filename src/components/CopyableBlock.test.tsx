@@ -80,6 +80,20 @@ describe("CopyableBlock", () => {
 
     await waitFor(() => {
       expect(writeText).toHaveBeenCalledWith("/Users/test/Library/Logs/Daemonic/service.log")
+      expect(screen.getByRole("status")).toHaveTextContent("Copied")
     })
   })
+})
+
+
+it("shows clipboard failures for inline and block copying", async () => {
+  const writeText = installClipboardMock()
+  writeText.mockRejectedValue(new Error("denied"))
+  Object.defineProperty(document, "execCommand", { configurable: true, value: vi.fn().mockReturnValue(false) })
+  render(<><CopyableInlineText text="inline" /><CopyableCodeBlock text="block"><pre>block</pre></CopyableCodeBlock></>)
+  fireEvent.click(screen.getByRole("button", { name: "Copy text" }))
+  fireEvent.click(screen.getByRole("button", { name: "Copy block text" }))
+  await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(2))
+  expect(screen.queryByRole("status")).not.toBeInTheDocument()
+  expect(document.querySelector('textarea')).toBeNull()
 })

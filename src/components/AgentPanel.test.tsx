@@ -11,6 +11,7 @@ const selectedJob: JobListEntry = {
   last_exit_code: 0,
   plist_path: "/Users/test/Library/LaunchAgents/com.example.running-agent.plist",
   source: "UserAgent",
+  is_home_agent: true,
   status: "Running",
   last_run_at: null,
   metadata: {

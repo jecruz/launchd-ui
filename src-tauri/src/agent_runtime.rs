@@ -479,12 +479,12 @@ fn run_command_with_input(mut command: Command, input: Option<&str>) -> Result<S
         .spawn()
         .map_err(|e| AppError::AgentRuntime(format!("failed to spawn command: {e}")))?;
 
-    if let Some(stdin_text) = input {
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(stdin_text.as_bytes())
-                .map_err(|e| AppError::AgentRuntime(format!("failed to write stdin: {e}")))?;
-        }
+    if let Some(stdin_text) = input
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        stdin
+            .write_all(stdin_text.as_bytes())
+            .map_err(|e| AppError::AgentRuntime(format!("failed to write stdin: {e}")))?;
     }
 
     let output = child

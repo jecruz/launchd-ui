@@ -1,6 +1,6 @@
 # Daemonic — Constitution
 
-> Last updated: 2026-06-16
+> Last updated: 2026-10-29
 > Version: 1.0.0
 
 ---
@@ -25,7 +25,7 @@ The product has two hard constraints that must never erode:
 | Tauri IPC contract | `src/lib/invoke.ts` |
 | Generated UI primitives | `src/components/ui/` (shadcn/ui — do not edit manually) |
 | Fake Tauri IPC for tests | `src/test-utils/tauri-mock.ts` |
-| Sidecar metadata index | `~/Library/Application Support/Daemonic/service-overrides.json` |
+| Sidecar metadata index | `~/Library/Application Support/Daemonic/service-overrides.json` (private atomic state and recovery journal) |
 
 ---
 
@@ -91,7 +91,7 @@ RUSTUP_HOME=$HOME/.rustup cargo clippy --manifest-path src-tauri/Cargo.toml -- -
 
 ## 8. Release Rules
 
-1. Version bumps use the `pnpm version:patch`, `pnpm version:minor`, or `pnpm version:major` scripts — these commit and tag in one step.
+1. Version bumps use the `pnpm version:patch`, `pnpm version:minor`, or `pnpm version:major` scripts. They update synchronized manifests without committing or tagging; `pnpm version:check` verifies consistency. Publication remains a separate reviewed release operation.
 2. The release artifact is `src-tauri/target/release/bundle/macos/Daemonic.app`. The `src-tauri/target/` tree is disposable compiler output and is not the distributed artifact.
 3. The app is unsigned. Release notes must include the quarantine removal step (`xattr -cr`) for users installing from a tarball.
 4. No release ships with `BLOCKER` findings from a code review pass.
@@ -100,7 +100,7 @@ RUSTUP_HOME=$HOME/.rustup cargo clippy --manifest-path src-tauri/Cargo.toml -- -
 
 ## 9. Commit Conventions
 
-Format: `type(scope): description`
+Format: `type(scope): [#NNN] description`
 
 | Type | When |
 |---|---|

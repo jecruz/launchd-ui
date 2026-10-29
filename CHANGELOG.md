@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Integrate upstream Home filtering, direct Run now controls, system/light/dark theme selection, and display-only copyable launchctl commands; system jobs offer read-only inspection.
+- Verify synchronized release manifests and release-workflow behavior with the upstream Node test suite adapted to Daemonic; roll back caught manifest replacement failures and retain conflict recovery snapshots.
+- Require issue-linked release PRs targeting main, explicit CI validation for token-created branches, and matching release branch/title/manifests before publication.
+
+### Changed
+
+- Synchronize Daemonic manifests at 1.4.2 and adopt the upstream Rust security-dependency baseline while retaining bounded native-TLS health probes and tray support.
+- Document DB2 examples as preserved, nonshipping, unvalidated historical material and distinguish source milestones from installed-runtime acceptance.
+
 ### Fixed
 
 - Preserve explicit health URLs in repair suggestions and retain failed health results ahead of unrelated stderr context.

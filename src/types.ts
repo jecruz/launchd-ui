@@ -1,6 +1,8 @@
 export type JobSource = "UserAgent" | "SystemAgent" | "SystemDaemon"
 export type JobStatus = "Running" | "Loaded" | "Unloaded" | "Unknown"
 
+export type SourceFilter = JobSource | "All" | "Home"
+
 export type JobSortKey = "group" | "label" | "source" | "status" | "pid" | "last_run_at" | "health"
 export type SortDirection = "asc" | "desc"
 
@@ -13,6 +15,7 @@ export type JobListEntry = {
   status: JobStatus
   last_run_at: string | null
   metadata: LaunchControlMetadata
+  is_home_agent: boolean
   log_paths: LogPaths
 }
 
@@ -167,7 +170,7 @@ export type AgentPromptRequest = {
 
 export type AppPreferences = {
   search: string
-  source_filter: JobSource | "All"
+  source_filter: SourceFilter
   group_filter: string
   sort_key: JobSortKey
   sort_direction: SortDirection

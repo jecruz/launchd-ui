@@ -1,91 +1,29 @@
-# FUBAR Roadmap: Daemonic
+# Daemonic delivery roadmap — #4487
 
-## Milestone 1: Lock Down Approved Action Safety
+Updated 2026-10-29. The user approved FINISH in five ordered milestones. Earlier FUBAR DONE labels described source slices; they did not prove installed-runtime acceptance. This roadmap supersedes those completion claims. The quarantined historical app is unsafe to launch.
 
-### Task 1.1: Validate enable and disable through the approved action path — DONE
+| Milestone | Ticket | Status and checkable acceptance |
+| --- | --- | --- |
+| 1. Mutation and probe security | #4488 | Source complete on reviewed remote branch: native loopback HTTP(S), deadline/size limits, no shell health execution; every mutation binds owned contained plist/label; negative tests. Rescue commits published and verified. |
+| 2. Durable state and UI races | #4489 | Source complete through `b39fc55`: 63 Rust/121 frontend tests; private atomic state, paired recovery, stale-result rejection, schedule validation, preference flush and explicit partial-success behavior. Production build only. |
+| 3. Upstream and scope | #4490 | Integration in progress on `integrate/daemonic-upstream-4490`; eight upstream commits through `d0ea653`, synchronized 1.4.2 manifests, preserved security/state guarantees, checked dependency lock and all source checks. Review and report before any merge into rescue. DB2 retained as nonshipping historical material. |
+| 4. Packaging and distribution | #4491 | Pending. Rebuild from identified source; remove stale DMG input and destructive replacement; document install/update/uninstall/verification and app activation behavior. Test installer only after separate user authorization through %202. |
+| 5. Real runtime acceptance | #4492 | Pending. Bound provider subprocess duration/output and cancellation; verify local-only provider behavior. After separate user launch permission, prove installed provenance, tray/window/quit, preferences and safe fixture actions, model readiness/failure, approval and auto-action policy. |
 
-Success criterion: approved agent actions for `Enable` and `Disable` require a user-agent plist path before mutation, matching start, stop, restart, and kickstart.
+## Feature acceptance matrix
 
-### Task 1.2: Replace loose command matching with structured command classification tests — DONE
+Feature tickets remain In Progress at 50% until their remaining evidence is accepted. Source/fake-IPC tests cannot establish real WebView, launchd, model-runtime or privacy behavior.
 
-Success criterion: Rust tests cover supported proposal forms, ambiguous text, and unsupported shell text.
+| Ticket | Implemented source evidence | Remaining acceptance |
+| --- | --- | --- |
+| #422 Agent-driven copilot | Prompt/context UI, structured proposals, explicit confirmation, native action classification, target binding, audit and refresh tests. | Authorized installed end-to-end prompt → approval → fixture mutation → independently observed result; denied/system actions remain blocked. |
+| #423 Local embedded model | Configurable Ollama, llama.cpp/yama.cpp and local CLI adapters, readiness details and smoke UI. | Provider subprocess deadlines/output/cancellation and locality hardening, actual local inference and unavailable-model behavior. There is no bundled embedded model. |
+| #424 Redmine workflow | Parent #4487 and five child Tasks in project 56; issue-linked commits, evidence paths, gate and boundary notes through sanctioned Redmine MCP. | Repeatable final handoff and issue updates after packaging/runtime milestones; no automatic in-app Redmine sync is claimed. |
+| #425 Full assistant | Text input, current-job context, in-session conversation history, proactive local signals and quick proposals. | Authorized installed-runtime acceptance and documented in-session history limits. Durable sensitive conversation storage is not added implicitly. |
+| #426 Semi-autonomous policy | Opt-in auto-apply only for classified user-agent Start/Kickstart; sensitive/system proposals require manual review or rejection; negative backend/UI tests. | Authorized fixture-based installed proof of safe auto actions, sensitive approval prompts, stale-target rejection and audit results. |
 
-### Task 1.3: Return exact execution metadata from approved actions — DONE
+## Verification and decision boundaries
 
-Success criterion: frontend receives action kind, display command, and verified post-action status without relying on placeholder text.
+All source tests, lint, formatting, type checking, dependency fetches and builds run through `/Users/jeffreycruz/.local/bin/heavy-op`. Commands and artifact hashes live under `/Users/jeffreycruz/Development/qualification-evidence/daemonic-finish-20261029/`. Run `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm test:release`, `pnpm version:check`, `cargo test --locked`, `cargo fmt --check`, `cargo clippy --locked -- -D warnings` and the uninstalled app production build against the integration result.
 
-## Milestone 2: Test The Agent Timeline
-
-### Task 2.1: Add frontend tests for structured model response parsing — DONE
-
-Success criterion: valid JSON, fenced JSON, invalid JSON, missing optional fields, and command proposal cases are covered.
-
-### Task 2.2: Add frontend tests for timeline state transitions — DONE
-
-Success criterion: summary, proposal, approval, apply, and verification states are tested with fake Tauri handlers.
-
-### Task 2.3: Add regression coverage for user-agent-only apply UI — DONE
-
-Success criterion: apply control appears for user agents only and stays hidden for system agents and daemons.
-
-## Milestone 3: Improve Runtime Configuration Ergonomics
-
-### Task 3.1: Add runtime provider readiness details to the control surface — DONE
-
-Success criterion: missing executable, missing model, and valid provider states are clear without opening the audit trail.
-
-### Task 3.2: Prevent running prompts when selected provider is incomplete — DONE
-
-Success criterion: run controls are disabled with a specific reason when the configured provider is not ready.
-
-### Task 3.3: Add a lightweight runtime smoke action — DONE
-
-Success criterion: user can send a minimal local test prompt and see success or failure before using job context.
-
-## Milestone 4: Update Project Documentation
-
-### Task 4.1: Update README for tray-first agent-driven Daemonic — DONE
-
-Success criterion: README accurately describes menu bar behavior, local runtime adapters, approval-gated actions, and safety constraints.
-
-### Task 4.2: Add operator safety notes — DONE
-
-Success criterion: docs clearly state what can mutate, what is read-only, and why arbitrary model commands are not executed.
-
-### Task 4.3: Document verification commands — DONE
-
-Success criterion: all commands required by the FUBAR gate are listed with the correct environment variables.
-
-## Milestone 5: Final Review And Checkpoint
-
-### Task 5.1: Run domain review — DONE
-
-Success criterion: UI, async, API, and file/I/O checklist items are reviewed against changed files.
-
-### Task 5.2: Run diff-only code review — DONE
-
-Success criterion: zero BLOCKER findings before commit.
-
-### Task 5.3: Run full verifier gate — DONE
-
-Success criterion: typecheck, build, tests, lint, Rust tests, format check, and clippy pass.
-
-## Milestone 6: Continue Assistant And Policy Scope
-
-### Task 6.1: Add in-session assistant conversation history — DONE
-
-Success criterion: recent assistant turns show action, summary, prompt/response, and command proposal state.
-
-### Task 6.2: Add proactive job insights — DONE
-
-Success criterion: the panel surfaces local status/plist signals before prompting the model.
-
-### Task 6.3: Add conservative semi-autonomous execution policy — DONE
-
-Success criterion: opt-in auto-apply only runs safe user-agent start/kickstart-style proposals while preserving manual review for sensitive/system actions.
-
-## Approval Gate
-
-FUBAR requires human approval before implementation continues past this roadmap.
-
-Recommended first build task: Task 1.1, because approved-action safety is the highest-risk part of the agent-driven workflow.
+Main stays at `aa6233c`; rescue stays at `721d5db` until explicitly authorized. Work stays on descendant milestone branches. The M3 integration must be reported before merging into rescue. Daemonic installation and app launch each require separate user approval through %202; build success never grants either approval. No main merge is authorized.

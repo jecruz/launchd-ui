@@ -132,11 +132,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                if !QUIT_APPROVED.load(std::sync::atomic::Ordering::SeqCst) {
-                    api.prevent_exit();
-                    let _ = app.emit(TRAY_COMMAND_EVENT, "quit");
-                }
+            if let tauri::RunEvent::ExitRequested { api, .. } = event
+                && !QUIT_APPROVED.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                api.prevent_exit();
+                let _ = app.emit(TRAY_COMMAND_EVENT, "quit");
             }
         });
 }

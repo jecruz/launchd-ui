@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react"
-import type { JobListEntry, JobSource, JobSortKey, SortDirection } from "@/types"
+import type { JobListEntry, SourceFilter, JobSortKey, SortDirection } from "@/types"
 import { listJobs } from "@/lib/invoke"
 
 type UseJobsReturn = {
@@ -9,8 +9,8 @@ type UseJobsReturn = {
   error: string | null
   search: string
   setSearch: (value: string) => void
-  sourceFilter: JobSource | "All"
-  setSourceFilter: (value: JobSource | "All") => void
+  sourceFilter: SourceFilter
+  setSourceFilter: (value: SourceFilter) => void
   groupFilter: string
   setGroupFilter: (value: string) => void
   sortKey: JobSortKey
@@ -22,7 +22,7 @@ type UseJobsReturn = {
 
 export function useJobs(initialState?: {
   search?: string
-  sourceFilter?: JobSource | "All"
+  sourceFilter?: SourceFilter
   groupFilter?: string
   sortKey?: JobSortKey
   sortDirection?: SortDirection
@@ -31,7 +31,7 @@ export function useJobs(initialState?: {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState(initialState?.search ?? "")
-  const [sourceFilter, setSourceFilter] = useState<JobSource | "All">(initialState?.sourceFilter ?? "All")
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>(initialState?.sourceFilter ?? "All")
   const [groupFilter, setGroupFilter] = useState(initialState?.groupFilter ?? "All")
   const [sortKey, setSortKey] = useState<JobSortKey>(initialState?.sortKey ?? "health")
   const [sortDirection, setSortDirection] = useState<SortDirection>(initialState?.sortDirection ?? "asc")
@@ -92,7 +92,7 @@ export function useJobs(initialState?: {
       (job.metadata.health_check_command ?? "").toLowerCase().includes(search.toLowerCase()) ||
       job.metadata.ports.some((port) => String(port).includes(search.toLowerCase()))
     const matchesSource =
-      sourceFilter === "All" || job.source === sourceFilter
+      sourceFilter === "All" || (sourceFilter === "Home" ? job.is_home_agent : job.source === sourceFilter)
     const matchesGroup =
       groupFilter === "All" || (job.metadata.group ?? "Ungrouped") === groupFilter
     return matchesSearch && matchesSource && matchesGroup

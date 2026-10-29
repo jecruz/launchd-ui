@@ -18,6 +18,7 @@ const mockJobs: JobListEntry[] = [
     last_exit_code: 0,
     plist_path: "/Users/test/Library/LaunchAgents/com.example.zulu.plist",
     source: "UserAgent",
+    is_home_agent: true,
     status: "Loaded",
     last_run_at: String(Date.now() - 10_000),
     metadata: {
@@ -46,6 +47,7 @@ const mockJobs: JobListEntry[] = [
     last_exit_code: 78,
     plist_path: "/Users/test/Library/LaunchAgents/com.example.alpha.plist",
     source: "SystemDaemon",
+    is_home_agent: false,
     status: "Unloaded",
     last_run_at: null,
     metadata: {
@@ -74,6 +76,7 @@ const mockJobs: JobListEntry[] = [
     last_exit_code: 0,
     plist_path: "/Users/test/Library/LaunchAgents/com.example.bravo.plist",
     source: "SystemAgent",
+    is_home_agent: false,
     status: "Running",
     last_run_at: String(Date.now() - 20_000),
     metadata: {
@@ -241,6 +244,7 @@ describe("JobList", () => {
           ...mockJobs[0],
           status: "Running",
           source: "UserAgent",
+    is_home_agent: true,
         },
       ],
     })
@@ -249,5 +253,13 @@ describe("JobList", () => {
     expect(screen.getByTitle("Restart")).toBeInTheDocument()
     expect(screen.getByTitle("Edit")).toBeInTheDocument()
     expect(screen.getAllByTitle("Delete").length).toBeGreaterThan(0)
+  })
+  it("runs loaded user agents and disables the system action", () => {
+    const onKickstart = vi.fn()
+    renderJobList({ onKickstart })
+    screen.getByRole("button", { name: "Run now" }).click()
+    expect(onKickstart).toHaveBeenCalledWith(mockJobs[0])
+    expect(screen.getByRole("button", { name: "Cannot run system agents" })).toBeDisabled()
+    expect(screen.queryByTitle("Cannot run unloaded agents")).not.toBeInTheDocument()
   })
 })

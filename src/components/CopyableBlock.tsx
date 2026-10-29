@@ -73,6 +73,7 @@ export function CopyableCodeBlock({
 }: CopyableCodeBlockProps) {
   const contentRef = useRef<HTMLDivElement | null>(null)
   const [copied, setCopied] = useState(false)
+  const [copyError, setCopyError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!copied) return
@@ -82,8 +83,11 @@ export function CopyableCodeBlock({
 
   const handleCopy = async () => {
     const selectionText = getSelectedTextWithin(contentRef.current)
-    await copyTextToClipboard(selectionText ?? text)
-    setCopied(true)
+    try {
+      setCopyError(null)
+      await copyTextToClipboard(selectionText ?? text)
+      setCopied(true)
+    } catch (error) { setCopied(false); setCopyError(`Could not copy: ${String(error)}`) }
   }
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -101,6 +105,8 @@ export function CopyableCodeBlock({
     >
       <div ref={contentRef}>{children}</div>
       <CopyButton onCopy={handleCopy} copied={copied} ariaLabel={copyLabel} />
+      {copied && <span role="status" className="sr-only">Copied</span>}
+      {copyError && <span role="alert" className="text-sm text-destructive">{copyError}</span>}
     </div>
   )
 }
@@ -120,6 +126,7 @@ export function CopyableInlineText({
   copyLabel = "Copy text",
 }: CopyableInlineTextProps) {
   const [copied, setCopied] = useState(false)
+  const [copyError, setCopyError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!copied) return
@@ -128,8 +135,11 @@ export function CopyableInlineText({
   }, [copied])
 
   const handleCopy = async () => {
-    await copyTextToClipboard(text)
-    setCopied(true)
+    try {
+      setCopyError(null)
+      await copyTextToClipboard(text)
+      setCopied(true)
+    } catch (error) { setCopied(false); setCopyError(`Could not copy: ${String(error)}`) }
   }
 
   return (
@@ -142,8 +152,10 @@ export function CopyableInlineText({
         className
       )}
       aria-label={copyLabel}
-      title={copyLabel}
+      title={copyError ?? copyLabel}
     >
+      {copied && <span role="status" className="sr-only">Copied</span>}
+      {copyError && <span role="alert" className="text-destructive">{copyError}</span>}
       <span className="min-w-0 truncate">{text}</span>
       {copied ? <Check className="h-3.5 w-3.5 shrink-0 text-emerald-500" /> : <Copy className="h-3.5 w-3.5 shrink-0 opacity-0 transition group-hover:opacity-100" />}
     </button>

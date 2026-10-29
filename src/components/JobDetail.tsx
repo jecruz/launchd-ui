@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { CommandPanel } from "@/components/CommandPanel"
 import { LogViewer } from "@/components/LogViewer"
 import { CopyableCodeBlock, CopyableInlineText } from "@/components/CopyableBlock"
 import { deriveHealthText } from "@/lib/health"
@@ -440,6 +441,7 @@ export function JobDetail({ plistPath, open, onClose, onEdit, onRepair }: JobDet
               <TabsList>
                 <TabsTrigger value="config">Configuration</TabsTrigger>
                 <TabsTrigger value="logs">Logs</TabsTrigger>
+                <TabsTrigger value="commands">Commands</TabsTrigger>
               </TabsList>
 
             <TabsContent value="config" className="space-y-1">
@@ -570,8 +572,12 @@ export function JobDetail({ plistPath, open, onClose, onEdit, onRepair }: JobDet
                       <div className="text-sm text-muted-foreground py-4">
                         No log paths configured for this agent
                       </div>
-                    )}
+                  )}
                 </div>
+              </TabsContent>
+
+              <TabsContent value="commands">
+                <CommandPanel job={job} />
               </TabsContent>
             </Tabs>
           </div>

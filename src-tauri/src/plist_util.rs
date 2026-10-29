@@ -37,10 +37,10 @@ pub fn scan_plist_files() -> Vec<(String, JobSource)> {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("plist") {
-                    if let Some(path_str) = path.to_str() {
-                        results.push((path_str.to_string(), source.clone()));
-                    }
+                if path.extension().and_then(|e| e.to_str()) == Some("plist")
+                    && let Some(path_str) = path.to_str()
+                {
+                    results.push((path_str.to_string(), source.clone()));
                 }
             }
         }
@@ -260,13 +260,12 @@ pub fn validate_raw_schedule(bytes: &[u8]) -> Result<(), AppError> {
             }
         }
     }
-    if let Some(value) = dictionary.get("StartInterval") {
-        if !value
+    if let Some(value) = dictionary.get("StartInterval")
+        && !value
             .as_unsigned_integer()
             .is_some_and(|v| v > 0 && v <= i64::MAX as u64)
-        {
-            return Err(invalid());
-        }
+    {
+        return Err(invalid());
     }
     if let Some(value) = dictionary.get("StartCalendarInterval") {
         let values = match value {
@@ -293,13 +292,12 @@ pub fn validate_raw_schedule(bytes: &[u8]) -> Result<(), AppError> {
                 ("Weekday", 0, 7),
                 ("Month", 1, 12),
             ] {
-                if let Some(value) = value.get(key) {
-                    if !value
+                if let Some(value) = value.get(key)
+                    && !value
                         .as_unsigned_integer()
                         .is_some_and(|v| v >= minimum && v <= maximum)
-                    {
-                        return Err(invalid());
-                    }
+                {
+                    return Err(invalid());
                 }
             }
         }

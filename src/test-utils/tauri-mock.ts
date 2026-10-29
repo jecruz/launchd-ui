@@ -40,6 +40,7 @@ const fakeJobs: JobListEntry[] = [
     last_exit_code: 0,
     plist_path: "/Users/test/Library/LaunchAgents/com.example.running-agent.plist",
     source: "UserAgent",
+    is_home_agent: true,
     status: "Running",
     last_run_at: String(Date.now()),
     metadata: {
@@ -68,6 +69,7 @@ const fakeJobs: JobListEntry[] = [
     last_exit_code: 78,
     plist_path: "/Users/test/Library/LaunchAgents/com.example.stopped-agent.plist",
     source: "UserAgent",
+    is_home_agent: false,
     status: "Unloaded",
     last_run_at: null,
     metadata: {
@@ -96,6 +98,7 @@ const fakeJobs: JobListEntry[] = [
     last_exit_code: 0,
     plist_path: "/Library/LaunchAgents/com.apple.system-agent.plist",
     source: "SystemAgent",
+    is_home_agent: false,
     status: "Running",
     last_run_at: String(Date.now() - 3600000),
     metadata: {

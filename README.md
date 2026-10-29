@@ -147,14 +147,7 @@ Semi-autonomous mode is deliberately conservative. When enabled, only safe user-
 
 ## Install
 
-This app is not code-signed. For local updates, build the app and install it into `/Applications`:
-
-```bash
-cd /Users/jeffreycruz/Development/TOOLS/daemonic
-pnpm package:macos:install
-```
-
-This command rebuilds `Daemonic.app`, installs it to `/Applications/Daemonic.app`, and clears quarantine on the installed copy.
+Packaging qualification is pending in Redmine #4491. The current legacy installer and DMG scripts are not qualified for use. Do not install or launch this build until the user separately authorizes it through the project orchestrator. Source-build instructions below create an uninstalled bundle; they do not perform runtime acceptance. The quarantined historical app must remain unlaunched.
 
 ## macOS Antivirus Notes
 
@@ -213,6 +206,8 @@ pnpm typecheck
 pnpm build
 pnpm test
 pnpm lint
+pnpm test:release
+pnpm version:check
 
 RUSTUP_HOME=$HOME/.rustup cargo test --manifest-path src-tauri/Cargo.toml
 RUSTUP_HOME=$HOME/.rustup cargo fmt --manifest-path src-tauri/Cargo.toml --check
@@ -222,3 +217,14 @@ RUSTUP_HOME=$HOME/.rustup cargo clippy --manifest-path src-tauri/Cargo.toml -- -
 ## License
 
 MIT
+
+
+## Upstream integration and qualification
+
+The integration branch for Redmine #4490 includes upstream `d0ea653` (eight commits through release 1.4.2 and the Rust security-dependency update). Daemonic retains its application identity, tray interface, bounded health probes, validated mutations and recoverable state. Home is a presentation heuristic for user-authored scripts under the home directory; it grants no mutation permission. Run now uses the existing validated backend. Commands are copied for manual inspection and are never executed by the command panel. Theme selection follows the system unless light/dark is selected.
+
+`pnpm version:check` requires matching package, Tauri, Cargo manifest and root lock versions. Version bump scripts stage these four files and roll back caught replacement failures, without committing, tagging or publishing. Abrupt interruption can leave private `.previous` recovery snapshots: restore a consistent set from Git or the snapshots and rerun `pnpm version:check` before continuing. Release-script tests run separately with `pnpm test:release`. The current source qualification is separate from installation and runtime acceptance; see `ROADMAP.md` and `docs/qualification/m3-upstream-4490.md`.
+
+### Historical DB2 examples
+
+`src-tauri/src/db2_missing_index_examples.json` is retained byte-for-byte as historical user material. It is unrelated to Daemonic's launchd features, is not loaded by the app, and is not configured as a bundled resource. Its performance claims are unvalidated; six examples reference undefined SQL and nine index names collide. Do not execute the examples or use them as a qualified training/benchmark corpus. This milestone preserves the file in place rather than moving or deleting it. See `docs/qualification/db2-scope.md`.

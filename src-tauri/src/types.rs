@@ -27,6 +27,8 @@ pub struct JobListEntry {
     pub last_run_at: Option<String>,
     pub metadata: LaunchControlMetadata,
     pub log_paths: LogPaths,
+    /// Presentation heuristic for the Home filter; never a mutation authority.
+    pub is_home_agent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -146,6 +148,7 @@ mod tests {
             last_run_at: None,
             metadata: LaunchControlMetadata::default(),
             log_paths: LogPaths::default(),
+            is_home_agent: false,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let deserialized: JobListEntry = serde_json::from_str(&json).unwrap();
