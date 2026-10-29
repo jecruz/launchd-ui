@@ -567,3 +567,14 @@ it("supports explicitly clearing manually entered ports", async () => {
   expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ ports: [] }) }), undefined)
   view.unmount()
 })
+
+it("saves the honestly labeled Monday preset as Monday only", async () => {
+  const draft = createEmptyJobFormDraft()
+  draft.config.label = "com.example.monday"
+  const onSave = vi.fn()
+  const view = render(<JobForm open draft={draft} onSave={onSave} onClose={vi.fn()} onDraftChange={vi.fn()} />)
+  await userEvent.setup().click(screen.getByRole("button", { name: "Monday 9:00" }))
+  await userEvent.setup().click(screen.getByRole("button", { name: "Create" }))
+  expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ start_calendar_interval: [{ minute: 0, hour: 9, weekday: 1, day: null, month: null }] }), undefined)
+  view.unmount()
+})

@@ -301,20 +301,24 @@ pub fn record_health(
     state_io::locked(&directory, || {
         recover_at(&plist_util::get_user_agents_dir(), &directory)?;
         let mut overrides = load_at(&directory, Some(&legacy_overrides_file()?))?;
-        let base = plist_util::parse_plist(path)?.metadata;
-        let mut metadata = merge_metadata(&base, overrides.get(path));
-        metadata.health_status = Some(status.into());
-        metadata.health_detail = Some(detail.into());
-        metadata.last_health_check_at = Some(checked_at.into());
-        overrides.insert(
-            path.into(),
-            ServiceOverride {
-                complete: true,
-                metadata,
-            },
-        );
+        let _ = plist_util::parse_plist(path)?;
+        let updated = health_observation(overrides.get(path), status, detail, checked_at);
+        overrides.insert(path.into(), updated);
         state_io::write(&directory.join(SERVICE_OVERRIDES_FILE_NAME), &overrides)
     })
+}
+
+fn health_observation(
+    existing: Option<&ServiceOverride>,
+    status: &str,
+    detail: &str,
+    checked_at: &str,
+) -> ServiceOverride {
+    let mut updated = existing.cloned().unwrap_or_default();
+    updated.metadata.health_status = Some(status.into());
+    updated.metadata.health_detail = Some(detail.into());
+    updated.metadata.last_health_check_at = Some(checked_at.into());
+    updated
 }
 
 fn merge_option<T: Clone>(base: Option<T>, overlay: Option<T>) -> Option<T> {
@@ -395,6 +399,27 @@ mod tests {
         let path = root.join(format!("{label}.plist"));
         std::fs::write(&path, &bytes).unwrap();
         (path.to_string_lossy().into_owned(), bytes)
+    }
+
+    #[test]
+    fn health_only_updates_do_not_freeze_external_plist_metadata() {
+        let observation = health_observation(None, "healthy", "HTTP 200", "123");
+        assert!(!observation.complete);
+        assert!(observation.metadata.group.is_none());
+        let base = LaunchControlMetadata {
+            group: Some("externally edited".into()),
+            ports: vec![8001, 8002],
+            ..Default::default()
+        };
+        let merged = merge_metadata(&base, Some(&observation));
+        assert_eq!(merged.group, base.group);
+        assert_eq!(merged.ports, base.ports);
+        assert_eq!(merged.health_status.as_deref(), Some("healthy"));
+        let complete = ServiceOverride {
+            complete: true,
+            metadata: base,
+        };
+        assert!(health_observation(Some(&complete), "unknown", "none", "456").complete);
     }
 
     #[test]

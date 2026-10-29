@@ -203,7 +203,16 @@ pub fn parse_plist_bytes(bytes: &[u8]) -> Result<PlistConfig, AppError> {
 }
 
 fn calendar_valid(interval: &CalendarInterval) -> bool {
-    interval.minute.is_none_or(|v| v <= 59)
+    [
+        interval.minute,
+        interval.hour,
+        interval.day,
+        interval.weekday,
+        interval.month,
+    ]
+    .iter()
+    .any(Option::is_some)
+        && interval.minute.is_none_or(|v| v <= 59)
         && interval.hour.is_none_or(|v| v <= 23)
         && interval.day.is_none_or(|v| (1..=31).contains(&v))
         && interval.weekday.is_none_or(|v| v <= 7)
@@ -218,7 +227,9 @@ pub fn validate_config(config: &PlistConfig) -> Result<(), AppError> {
         || config
             .start_calendar_interval
             .as_ref()
-            .is_some_and(|values| values.iter().any(|value| !calendar_valid(value)))
+            .is_some_and(|values| {
+                values.is_empty() || values.iter().any(|value| !calendar_valid(value))
+            })
         || config.metadata.ports.contains(&0)
     {
         return Err(AppError::Plist(
@@ -263,8 +274,18 @@ pub fn validate_raw_schedule(bytes: &[u8]) -> Result<(), AppError> {
             Value::Dictionary(_) => vec![value],
             _ => return Err(invalid()),
         };
+        if values.is_empty() {
+            return Err(invalid());
+        }
         for value in values {
             let value = value.as_dictionary().ok_or_else(invalid)?;
+            if value.is_empty()
+                || value.keys().any(|key| {
+                    !["Minute", "Hour", "Day", "Weekday", "Month"].contains(&key.as_str())
+                })
+            {
+                return Err(invalid());
+            }
             for (key, minimum, maximum) in [
                 ("Minute", 0, 59),
                 ("Hour", 0, 23),
@@ -530,6 +551,21 @@ mod tests {
         file.write_all(xml.as_bytes()).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    #[test]
+    fn rejects_empty_unknown_and_misspelled_calendar_fields() {
+        for value in [
+            "<dict/>",
+            "<array/>",
+            "<dict><key>Minut</key><integer>5</integer></dict>",
+            "<dict><key>Minute</key><integer>5</integer><key>Other</key><integer>1</integer></dict>",
+        ] {
+            let xml = format!(
+                "<plist><dict><key>Label</key><string>safe</string><key>StartCalendarInterval</key>{value}</dict></plist>"
+            );
+            assert!(parse_plist_bytes(xml.as_bytes()).is_err());
+        }
     }
 
     #[test]

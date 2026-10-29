@@ -347,3 +347,18 @@ it("allows only one suggested-metadata save while verification is pending", asyn
   view.unmount()
   resetFakeHandlers()
 })
+
+it("reports persisted metadata independently when refreshing saved detail fails", async () => {
+  const getDetail = vi.fn().mockReturnValueOnce(baseJob).mockRejectedValue(new Error("Refresh unavailable"))
+  setFakeHandler("get_job_detail", getDetail)
+  setFakeHandler("diagnose_service", () => ({ summary: "Suggested metadata only", likely_causes: [], suggestions: [], health_status: "unknown", health_detail: null, suggested_metadata: { ...baseJob.plist.metadata, health_check_url: "http://127.0.0.1:3002/" }, stderr_excerpt: null, stdout_excerpt: null }))
+  setFakeHandler("save_job", () => undefined)
+  setFakeHandler("check_service_health", () => ({ status: "healthy", detail: "HTTP 200", checked_at: String(Date.now()) }))
+  const view = render(<JobDetail plistPath={baseJob.plist_path} open onClose={vi.fn()} onEdit={vi.fn()} onRepair={vi.fn()} />)
+  await screen.findByRole("heading", { name: "Repair" })
+  await userEvent.setup().click(screen.getByRole("button", { name: "Apply Suggested Fix" }))
+  await screen.findByText(/Metadata saved; detail refresh failed/)
+  expect(screen.getAllByText("http://127.0.0.1:3002/").length).toBeGreaterThan(0)
+  view.unmount()
+  resetFakeHandlers()
+})

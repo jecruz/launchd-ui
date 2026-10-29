@@ -1439,7 +1439,7 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
                     Daily 9:00
                   </Button>
                   <Button type="button" variant="outline" size="sm" onClick={() => applyCalendarPreset("weekday")}>
-                    Weekdays 9:00
+                    Monday 9:00
                   </Button>
                   <Button type="button" variant="outline" size="sm" onClick={() => applyCalendarPreset("hourly")}>
                     Every hour

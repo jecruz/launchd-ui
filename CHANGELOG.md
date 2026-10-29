@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Keep explicit health destinations authoritative, preserve existing ports during repairs, and store health observations without freezing external plist metadata.
+- Reject empty or misspelled calendar schedules, label the Monday preset accurately, and include month constraints in schedule descriptions.
+- Report saved metadata separately from failed refreshes and show repair suggestions independently of cached health status.
+
 - Reject malformed raw schedule values before every parse so invalid integers cannot become wildcard schedules; preserve original XML comments.
 - Capture and sync deletion targets before removing them, bind log reads to declared destinations, and protect UI input during preference bootstrap.
 - Preserve successful action results after refresh failures, block concurrent suggested fixes, display generated risks, and reject invalid manual port values.

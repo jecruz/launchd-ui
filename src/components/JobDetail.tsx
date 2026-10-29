@@ -158,8 +158,10 @@ export function JobDetail({ plistPath, open, onClose, onEdit, onRepair }: JobDet
     const generation = selection.current.generation
     const current = () => selection.current.generation === generation
     setCheckingHealth(true)
+    let persisted = false
     try {
       await saveJob(job.plist_path, { ...job.plist, metadata: { ...job.plist.metadata, ...diagnosis.suggested_metadata } })
+      persisted = true
       if (!current()) return
       let verificationError: unknown
       try { await checkServiceHealth(job.plist_path) } catch (error) { verificationError = error }
@@ -170,7 +172,13 @@ export function JobDetail({ plistPath, open, onClose, onEdit, onRepair }: JobDet
       await fetchDiagnosis(job.plist_path, generation)
       if (verificationError && current()) setDiagnosisError(`Metadata saved; health verification failed: ${String(verificationError)}`)
     } catch (error) {
-      if (current()) setDiagnosisError(String(error))
+      if (current()) {
+        if (persisted) {
+          setJob({ ...job, plist: { ...job.plist, metadata: { ...job.plist.metadata, ...diagnosis!.suggested_metadata } } })
+          setDiagnosis(null)
+          setDiagnosisError(`Metadata saved; detail refresh failed: ${String(error)}. Reopen the job to reconcile its saved state.`)
+        } else setDiagnosisError(String(error))
+      }
     } finally {
       if (current()) setCheckingHealth(false)
     }
@@ -178,14 +186,13 @@ export function JobDetail({ plistPath, open, onClose, onEdit, onRepair }: JobDet
 
   const noExplicitHealthCheck =
     Boolean(job) &&
-    (job?.plist.metadata.health_status === "unknown" || job?.plist.metadata.health_status == null) &&
     !(job && hasExplicitHealthCheck(job))
   const showRepairButton =
     job?.source === "UserAgent" &&
     Boolean(diagnosis?.suggested_metadata || (diagnosis?.suggestions?.length ?? 0) > 0)
   const hasRepairSignals =
     Boolean(diagnosis) &&
-    (diagnosis?.health_status === "unhealthy" ||
+    (diagnosis?.suggested_metadata != null || diagnosis?.health_status === "unhealthy" ||
       (diagnosis?.likely_causes?.length ?? 0) > 0 ||
       (diagnosis?.suggestions?.length ?? 0) > 0)
   const repairSectionTitle = noExplicitHealthCheck || !hasRepairSignals ? "Health" : "Repair"

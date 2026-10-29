@@ -274,3 +274,9 @@ it("formats both OR calendar constraints in single and hour-range schedules", ()
   expect(formatCalendarIntervals([interval])).toContain("Every Sunday or day 15 of each month")
   expect(formatCalendarIntervals([interval, { ...interval, hour: 10 }])).toContain("Every Sunday or day 15 of each month")
 })
+
+it("includes a month restriction alongside combined Day and Weekday constraints", () => {
+  const interval = { minute: 0, hour: 9, day: 15, weekday: 7, month: 12 }
+  expect(formatCalendarIntervals([interval])).toContain("in month 12")
+  expect(formatCalendarIntervals([interval, { ...interval, hour: 10 }])).toContain("in month 12")
+})

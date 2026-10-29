@@ -18,7 +18,7 @@ Production compilation exposed that the previous `tsc --noEmit` script checked o
 
 ## Verification result
 
-Final source checks passed: 59 Rust tests, 118 frontend tests, `cargo clippy` with warnings denied, formatting, `tsc -b`, lint with zero warnings/errors, and a production app bundle. The app was not installed or launched. The frontend tests retain an existing Radix missing-description warning in JobDetail; Vite reports the approximately 508 KiB minified application chunk. Neither is a failing test or runtime acceptance claim.
+Final source checks passed: 62 Rust tests, 121 frontend tests, `cargo clippy` with warnings denied, formatting, `tsc -b`, lint with zero warnings/errors, and a production app bundle. The app was not installed or launched. The frontend tests retain an existing Radix missing-description warning in JobDetail; Vite reports the approximately 510 KiB minified application chunk. Neither is a failing test or runtime acceptance claim.
 
 Independent review `584723f8-a7ea-405d-a7d0-007a936febd3` returned zero criticals and ten warnings. All ten received bounded corrections before the first gate push: retain the command's original file identity inside the transaction; reject raw invalid port elements; compact binary-safe base64 journal snapshots with maximum 1 MiB before/after fixtures; atomically exchange and validate displaced plists with a deterministic post-precheck race fixture; recover from rejected window geometry operations; invalidate delayed list edits on every form opening; refresh persisted metadata after failed health verification; block saving omitted restored drafts; reject invalid calendar bases before range expansion; and display both Day/Weekday OR constraints. The new dependency declaration promotes the already-locked base64 0.22.1 package; no transitive version changed. Review receipt and gate evidence are retained in the evidence directory.
 
@@ -64,7 +64,30 @@ The same correction closes related M2 findings: delete captures the target by ex
 
 Packaging warnings (stale README installed-app flow, destructive installer, stale DMG input, LSBackgroundOnly) remain #4491. DB2 corpus performance/ambiguous SQL warnings remain #4490 and are not validated claims. CopyableBlock's unhandled failure when both clipboard methods fail is a remaining info-level follow-up for #4490's upstream copy-command integration. Existing Radix missing-description and Vite chunk-size notices remain recorded. No installer or app has been launched to assess those surfaces.
 
-The corrective gate push is the last permitted correction attempt for this BLOCK. A further BLOCK or exhausted infrastructure retry stops work for orchestrator review; no gate bypass is authorized.
+The corrective push at `d4add5325eb3bcb6afb588f763f1595d9259322b` PASSed with zero criticals, 19 warnings and one info across five complete shards. Its exact commit was verified on origin and through GitHub's commit API. The original BLOCK was resolved within its single correction allowance. A subsequent small M2 warning-triage unit addresses the reproduced remaining state/health/schedule cases below and receives its own normal gate; no bypass is authorized.
+
+## Post-PASS warning disposition
+
+The 19 observations in the d4 gate receipt are all accounted for:
+
+| Observation | Disposition |
+| --- | --- |
+| Stale installed-app README flow; stale DMG input; destructive installer; LSBackgroundOnly (four) | Open in packaging milestone #4491; no installer invocation or app launch. |
+| Configured URL failure falls back to a different inferred listener | Explicit configured destinations are authoritative. A two-listener negative test proves a failed configured endpoint never contacts the inferred listener. |
+| Unmatched stderr declares current failure | Unmatched historical stderr is diagnostic context with health unknown. |
+| Uptime Kuma repair discards other ports | Repair preserves existing ports and adds the inferred port only when absent. |
+| DB2 performance claims; undefined SQL; colliding index names (three) | Open in scope milestone #4490; corpus preserved and unqualified. |
+| Empty or misspelled raw schedules broaden execution | Reject empty arrays/dictionaries, unknown calendar keys and empty typed schedules before mutation; negative native tests. |
+| Health-only observation freezes external metadata | Preserve existing overlay completeness; new observations write only health-result fields and inherit external metadata. Native merge regression covers group/ports. |
+| Transaction fixture allegedly omits required JSON fields | Not reproduced: the mentioned fields are native `Option` values or absent schema names. All transaction fixtures execute successfully in the native suite. |
+| PhysicalPosition/PhysicalSize import allegedly fails | Not reproduced: installed Tauri window declarations explicitly re-export both types; TypeScript project compilation and production build pass. |
+| Persisted metadata followed by detail-fetch failure appears unsaved | UI explicitly reports the committed save and failed refresh, retains saved metadata, and clears stale diagnosis. Deferred component regression. |
+| Cached health hides missing explicit check | Presence of configured URL/command determines missing-check guidance. |
+| Suggested metadata with healthy status hides repair | Suggested metadata participates in repair signals. |
+| Weekdays preset actually runs Mondays | Rename it Monday in UI and README; save-level test asserts weekday 1. |
+| Day/Weekday descriptions omit month | Include the month in single and ranged descriptions; OR-with-month regression. |
+
+The info-level clipboard feedback assertion and the earlier double-clipboard-failure observation remain assigned to #4490's upstream copy-command integration. No DB2 or installed-runtime qualification follows from these source tests.
 
 ## Boundary
 

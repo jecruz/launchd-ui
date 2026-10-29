@@ -73,7 +73,7 @@ When a plist cannot be modified directly, Daemonic also keeps a durable sidecar 
 - `HealthDetail`
 - `LastHealthCheckAt`
 
-The job detail pane can run the configured health check URL and persist the latest result back into that sidecar index. Command-based health checks (`HealthCheckCommand`) are disabled and report `unknown` when no health check URL is configured; stored command text is never executed. Bulk group actions are available from the dashboard cards for user agents only.
+An explicitly configured URL is authoritative; inferred fallback endpoints cannot replace its failed result. The job detail pane can run the configured health check URL and persist the latest result back into that sidecar index. Command-based health checks (`HealthCheckCommand`) are disabled and report `unknown` when no health check URL is configured; stored command text is never executed. Bulk group actions are available from the dashboard cards for user agents only.
 
 If a service has no explicit health URL or command, Daemonic falls back to lightweight local heuristics based on configured ports and a few common service labels. When nothing is configured it reports `unknown` instead of failing hard, so the user still gets a status readout.
 
@@ -111,7 +111,7 @@ Quick start:
 9. When a job has no explicit health check configured and no concrete repair suggestion, the Health panel stays informational and hides the `Repair` button.
 10. Hover any code or log block to reveal a copy button. Press `Cmd/Ctrl+A` while the block is focused to select all text inside it, then click copy to capture the selected text or the raw block. Click a job label or file path label to copy it directly.
 11. `New Agent` always starts a blank draft, even if you were editing a different plist before. Calendar schedule edits are preserved in the durable draft state until you save or cancel.
-12. In the `Schedule` section, use the `Calendar agent` presets for common clock-based jobs: `Daily 9:00`, `Weekdays 9:00`, or `Every hour`.
+12. In the `Schedule` section, use the `Calendar agent` presets for common clock-based jobs: `Daily 9:00`, `Monday 9:00`, or `Every hour`.
 
 The control surface shows readiness checks for executable, model, host, and prompt mode. Prompt execution stays disabled until the selected provider is complete. This is a local tool runner, not a remote chat API.
 

@@ -142,6 +142,7 @@ export function formatCalendarIntervals(intervals: CalendarInterval[]): string {
     } else {
       parts.push("Every day")
     }
+    if (range.base.month != null && (range.base.weekday != null || range.base.day != null)) parts.push(`in month ${range.base.month}`)
     const minute = String(range.base.minute ?? 0).padStart(2, "0")
     parts.push(`at :${minute} (${range.from}:00–${range.to}:00)`)
     return parts.join(" ")
@@ -163,6 +164,7 @@ function formatSingleCalendarInterval(ci: CalendarInterval): string {
   } else {
     parts.push("Every day")
   }
+  if (ci.month != null && (ci.weekday != null || ci.day != null)) parts.push(`in month ${ci.month}`)
   const minute = ci.minute ?? 0
   if (ci.hour === null || ci.hour === undefined) {
     parts.push(`every hour at :${String(minute).padStart(2, "0")}`)

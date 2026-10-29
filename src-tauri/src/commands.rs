@@ -408,29 +408,6 @@ fn run_health_check_command(
             return Ok(("healthy".to_string(), detail));
         }
 
-        if let Some(port) = parse_program_port(plist.program_arguments.as_ref()) {
-            if reqwest::Url::parse(url)
-                .ok()
-                .and_then(|url| url.port_or_known_default())
-                != Some(port)
-            {
-                let fallback_urls = [
-                    format!("http://127.0.0.1:{port}/health"),
-                    format!("http://127.0.0.1:{port}/status"),
-                    format!("http://127.0.0.1:{port}/"),
-                ];
-                for fallback in fallback_urls {
-                    let (fallback_healthy, fallback_detail) = probe_url(&fallback)?;
-                    if fallback_healthy {
-                        return Ok((
-                            "healthy".to_string(),
-                            format!("{detail}; fallback {fallback} succeeded: {fallback_detail}"),
-                        ));
-                    }
-                }
-            }
-        }
-
         return Ok(("unhealthy".to_string(), detail));
     }
 
@@ -600,7 +577,9 @@ fn suggest_repair(
             "Uptime Kuma is likely failing because its health/port metadata is incomplete."
                 .to_string()
         } else {
-            format!("The service is unhealthy. Recent stderr suggests: {stderr}")
+            format!(
+                "Health is unknown; stderr is diagnostic context and is not proof of current failure: {stderr}"
+            )
         }
     } else if label_lower.contains("uptime-kuma") {
         let declared_port =
@@ -645,7 +624,13 @@ fn suggest_repair(
                 .or_else(|| Some("local".to_string())),
             health_check_url: Some(format!("http://127.0.0.1:{declared_port}/")),
             health_check_command: metadata.health_check_command.clone(),
-            ports: vec![declared_port],
+            ports: {
+                let mut ports = metadata.ports.clone();
+                if !ports.contains(&declared_port) {
+                    ports.push(declared_port);
+                }
+                ports
+            },
             template: metadata
                 .template
                 .clone()
@@ -1040,6 +1025,37 @@ mod tests {
     }
 
     #[test]
+    fn failed_explicit_probe_does_not_contact_a_different_inferred_listener() {
+        let configured = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let fallback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        fallback.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/health", configured.local_addr().unwrap());
+        let port = fallback.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = configured.accept().unwrap();
+            let mut request = [0; 2048];
+            let _ = stream.read(&mut request).unwrap();
+            std::io::Write::write_all(
+                &mut stream,
+                b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        });
+        let config: PlistConfig = serde_json::from_value(serde_json::json!({"label":"safe", "raw_xml":"", "program_arguments":["service", format!("--port={port}")], "metadata":{"health_check_url":url}})).unwrap();
+        assert_eq!(
+            run_health_check_command("safe", &config, &config.metadata)
+                .unwrap()
+                .0,
+            "unhealthy"
+        );
+        server.join().unwrap();
+        assert_eq!(
+            fallback.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
     fn log_reads_require_the_owning_plists_declared_destination() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), "log data").unwrap();
@@ -1369,7 +1385,10 @@ mod tests {
                 environment_variables: None,
                 disabled: None,
                 wake_system: None,
-                metadata: LaunchControlMetadata::default(),
+                metadata: LaunchControlMetadata {
+                    ports: vec![3001, 9000],
+                    ..Default::default()
+                },
                 raw_xml: String::new(),
             },
             last_run_at: None,
@@ -1382,7 +1401,7 @@ mod tests {
             suggested.health_check_url.as_deref(),
             Some("http://127.0.0.1:3002/")
         );
-        assert_eq!(suggested.ports, vec![3002]);
+        assert_eq!(suggested.ports, vec![3001, 9000, 3002]);
         assert!(
             diagnosis
                 .likely_causes
