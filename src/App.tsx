@@ -340,7 +340,7 @@ function App() {
           await openControlCenter()
           setEditingJob(null)
           setJobFormDraft(createEmptyJobFormDraft())
-          formGeneration.current += 1; setFormKey((k) => k + 1)
+          editGeneration.current += 1; formGeneration.current += 1; setFormKey((k) => k + 1)
           setFormOpen(true)
         }
       })
@@ -368,9 +368,11 @@ function App() {
       const areas = monitors.map((monitor) => ({ x: monitor.workArea.position.x, y: monitor.workArea.position.y, width: monitor.workArea.size.width, height: monitor.workArea.size.height }))
       const resolvedGeometry = fitWindow(windowGeometry, areas)
       if (resolvedGeometry) {
-        await currentWindow.setSize(new PhysicalSize(resolvedGeometry.width, resolvedGeometry.height))
+        try { await currentWindow.setSize(new PhysicalSize(resolvedGeometry.width, resolvedGeometry.height)) }
+        catch (error) { setActionError(`Window size restoration failed: ${String(error)}`) }
         if (cancelled) return
-        await currentWindow.setPosition(new PhysicalPosition(resolvedGeometry.x, resolvedGeometry.y))
+        try { await currentWindow.setPosition(new PhysicalPosition(resolvedGeometry.x, resolvedGeometry.y)) }
+        catch (error) { setActionError(`Window position restoration failed: ${String(error)}`) }
         if (cancelled) return
         setWindowGeometry(resolvedGeometry)
       } else {
@@ -424,7 +426,7 @@ function App() {
   const handleEdit = useCallback((job: LaunchdJob) => {
     setEditingJob(job)
     setJobFormDraft(createJobFormDraftFromJob(job))
-    formGeneration.current += 1; setFormKey((k) => k + 1)
+    editGeneration.current += 1; formGeneration.current += 1; setFormKey((k) => k + 1)
     setFormOpen(true)
     setDetailOpen(false)
   }, [])
@@ -435,7 +437,7 @@ function App() {
       setJobFormDraft(
         createRepairJobFormDraftFromJob(job, diagnosis?.suggested_metadata ?? null)
       )
-      formGeneration.current += 1; setFormKey((k) => k + 1)
+      editGeneration.current += 1; formGeneration.current += 1; setFormKey((k) => k + 1)
       setFormOpen(true)
       setDetailOpen(false)
     },
@@ -599,7 +601,7 @@ function App() {
                 onClick={() => {
                   setEditingJob(null)
                   setJobFormDraft(createEmptyJobFormDraft())
-                  formGeneration.current += 1; setFormKey((k) => k + 1)
+                  editGeneration.current += 1; formGeneration.current += 1; setFormKey((k) => k + 1)
                   setFormOpen(true)
                 }}
               >

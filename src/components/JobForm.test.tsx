@@ -521,3 +521,25 @@ it("honors explicit empty repair fields rather than restoring previous values", 
   expect(repaired.config.metadata.template).toBeNull()
   expect(repaired.config.metadata.ports).toEqual([])
 })
+
+it("blocks saving an omitted restored draft and an invalid calendar range", async () => {
+  const onSave = vi.fn()
+  const props = { onSave, onClose: vi.fn(), onDraftChange: vi.fn() }
+  const restored = createEmptyJobFormDraft()
+  restored.config.label = "com.example.restored"
+  restored.sensitive_fields_omitted = true
+  const view = render(<JobForm {...props} open draft={restored} />)
+  await userEvent.setup().click(screen.getByRole("button", { name: "Create" }))
+  expect(onSave).not.toHaveBeenCalled()
+  expect(screen.getByText(/This restored draft omitted sensitive fields/)).toBeInTheDocument()
+  const invalid = createEmptyJobFormDraft()
+  invalid.config.label = "com.example.invalid"
+  invalid.schedule_type = "calendar"
+  invalid.hour_mode = "range"
+  invalid.calendar_interval = { minute: 99, hour: null, day: null, month: null, weekday: null }
+  view.rerender(<JobForm {...props} open draft={invalid} />)
+  await userEvent.setup().click(screen.getByRole("button", { name: "Create" }))
+  expect(onSave).not.toHaveBeenCalled()
+  expect(screen.getByText(/minute must be a whole number/)).toBeInTheDocument()
+  view.unmount()
+})

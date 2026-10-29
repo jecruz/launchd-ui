@@ -147,11 +147,23 @@ fn open_directory(path: &Path) -> Result<File, AppError> {
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+fn same_moved_file(a: &Metadata, b: &Metadata) -> bool {
+    // Rename can update ctime; inode identity, size and mtime still bind the snapshot.
+    a.dev() == b.dev()
+        && a.ino() == b.ino()
+        && b.is_file()
+        && b.nlink() == 1
+        && a.uid() == b.uid()
+        && a.len() == b.len()
+        && a.mtime() == b.mtime()
+        && a.mtime_nsec() == b.mtime_nsec()
+}
+
 fn atomic_publish(
     directory: &File,
     target: &CString,
     bytes: &[u8],
-    exclusive: bool,
+    expected: Option<&Metadata>,
     validate: impl FnOnce() -> Result<(), AppError>,
 ) -> Result<(), AppError> {
     let name = CString::new(format!(
@@ -165,30 +177,86 @@ fn atomic_publish(
         &name,
         libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
     )?;
-    let result = (|| {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        validate()?;
-        // SAFETY: both names are single components of the same open directory.
-        // RENAME_EXCL prevents creation from overwriting a concurrently created job.
+    let candidate = file.metadata()?;
+    let mut cleanup = Some(candidate.clone());
+    let swap = || {
+        // SAFETY: both single-component names belong to this retained directory.
         if unsafe {
             libc::renameatx_np(
                 directory.as_raw_fd(),
                 name.as_ptr(),
                 directory.as_raw_fd(),
                 target.as_ptr(),
-                if exclusive { libc::RENAME_EXCL } else { 0 },
+                libc::RENAME_SWAP,
             )
         } != 0
         {
-            return Err(std::io::Error::last_os_error().into());
+            return Err(AppError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    };
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        cleanup = Some(file.metadata()?);
+        validate()?;
+        if let Some(expected) = expected {
+            swap()?;
+            // Never unlink an unvalidated displaced entry, including a competing edit.
+            cleanup = None;
+            let displaced = open_at(directory, &name, libc::O_RDONLY)
+                .and_then(|file| file.metadata().map_err(Into::into));
+            if !displaced
+                .as_ref()
+                .is_ok_and(|actual| same_moved_file(expected, actual))
+            {
+                // Restore the competing entry. If a third writer changed the new target,
+                // its displaced entry is retained for operator recovery, never deleted.
+                swap()?;
+                if let Ok(actual) = open_at(directory, &name, libc::O_RDONLY)
+                    .and_then(|file| file.metadata().map_err(Into::into))
+                {
+                    if actual.dev() == candidate.dev() && actual.ino() == candidate.ino() {
+                        cleanup = Some(actual);
+                    }
+                }
+                directory.sync_all()?;
+                return Err(AppError::Plist("Concurrent plist replacement rejected; any conflicting temporary entry is retained for operator review.".into()));
+            }
+            let published = open_at(directory, target, libc::O_RDONLY)?.metadata()?;
+            if published.dev() != candidate.dev() || published.ino() != candidate.ino() {
+                return Err(AppError::Plist("Concurrent publication conflict; displaced original retained for operator review.".into()));
+            }
+            cleanup = displaced.ok();
+        } else {
+            // SAFETY: exclusive rename cannot replace a concurrently created job.
+            if unsafe {
+                libc::renameatx_np(
+                    directory.as_raw_fd(),
+                    name.as_ptr(),
+                    directory.as_raw_fd(),
+                    target.as_ptr(),
+                    libc::RENAME_EXCL,
+                )
+            } != 0
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
         }
         directory.sync_all()?;
         Ok(())
     })();
-    // SAFETY: cleanup refers only to the exclusive temporary entry created above.
-    unsafe {
-        libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0);
+    if let Some(identity) = cleanup {
+        if let Ok(current) = open_at(directory, &name, libc::O_RDONLY)
+            .and_then(|file| file.metadata().map_err(Into::into))
+        {
+            if same_moved_file(&identity, &current) {
+                // SAFETY: only the validated private temporary entry is removed.
+                unsafe {
+                    libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0);
+                }
+            }
+        }
     }
     result
 }
@@ -243,9 +311,13 @@ impl CheckedAgent {
 
     /// Replace bytes through a descriptor matching the originally validated inode.
     pub fn write(&self, bytes: &[u8]) -> Result<(), AppError> {
-        atomic_publish(&self.directory, &self.name, bytes, false, || {
-            self.ensure_current()
-        })
+        atomic_publish(
+            &self.directory,
+            &self.name,
+            bytes,
+            Some(&self.identity),
+            || self.ensure_current(),
+        )
     }
 
     /// Read the original bounded snapshot through its retained descriptor.
@@ -344,7 +416,7 @@ pub(crate) fn create_in(root: &Path, label: &str, bytes: &[u8]) -> Result<String
     let directory = open_directory(path.parent().ok_or_else(rejected)?)?;
     let name =
         CString::new(path.file_name().ok_or_else(rejected)?.as_bytes()).map_err(|_| rejected())?;
-    atomic_publish(&directory, &name, bytes, true, || Ok(()))?;
+    atomic_publish(&directory, &name, bytes, None, || Ok(()))?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -527,6 +599,37 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(validate_log_parents(&config).is_err());
+    }
+
+    #[test]
+    fn atomic_exchange_rejects_a_replacement_after_the_final_precheck() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "safe.plist", "safe");
+        let agent = load_in(root.path(), &path, None).unwrap();
+        let external = root.path().join("external");
+        let external_bytes = b"<plist><dict><key>Label</key><string>safe</string><key>Comment</key><string>external</string></dict></plist>";
+        std::fs::write(&external, external_bytes).unwrap();
+        let replacement = agent.original_bytes().unwrap();
+        let result = atomic_publish(
+            &agent.directory,
+            &agent.name,
+            &replacement,
+            Some(&agent.identity),
+            || {
+                agent.ensure_current()?;
+                std::fs::rename(&external, &path)?;
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), external_bytes);
+        assert!(!std::fs::read_dir(root.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".daemonic-")
+        }));
     }
 
     #[test]

@@ -961,6 +961,7 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
 
   const handleSave = async () => {
     setError(null)
+    if (sensitiveOmitted) { setError("This restored draft omitted sensitive fields. Reload the original job or start a new draft before saving."); return }
     if (!config.label.trim()) {
       setError("Label is required")
       return
@@ -970,6 +971,10 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
       return
     }
 
+    try {
+      if (scheduleType === "calendar") validateSchedule(null, [calendarInterval])
+      if (scheduleType === "calendar" && hourMode === "range") validateHourRange(hourRange.from, hourRange.to)
+    } catch (error) { setError(String(error)); return }
     const parsedArgs = args.trim() ? parseArguments(args.trim()) : null
     const finalConfig: PlistConfig = {
       ...config,
@@ -1009,7 +1014,7 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
       <DialogContent className="sm:max-w-[500px] max-h-[85vh] overflow-y-auto">
-        {sensitiveOmitted && <p role="status" className="text-sm text-amber-300">Restored drafts omit command arguments, environment values, and raw plist content. Re-enter these before saving.</p>}
+        {sensitiveOmitted && <p role="status" className="text-sm text-amber-300">Restored drafts omit command arguments, environment values, and raw plist content. Reload the original job or start a new draft before saving.</p>}
         <DialogHeader>
           <DialogTitle>
             {isEditing ? "Edit Agent" : "New Agent"}

@@ -314,3 +314,18 @@ it.each(["detail", "diagnosis"])("ignores a stale %s response after selecting an
   expect(onEdit).toHaveBeenCalledWith(next)
   resetFakeHandlers()
 })
+
+it("refreshes persisted metadata even when the following health check fails", async () => {
+  const getDetail = vi.fn().mockReturnValueOnce(baseJob).mockReturnValue({ ...baseJob, plist: { ...baseJob.plist, metadata: { ...baseJob.plist.metadata, health_check_url: "http://127.0.0.1:3002/" } } })
+  setFakeHandler("get_job_detail", getDetail)
+  setFakeHandler("diagnose_service", () => ({ summary: "Check metadata", likely_causes: [], suggestions: [], health_status: "unknown", health_detail: null, suggested_metadata: { ...baseJob.plist.metadata, health_check_url: "http://127.0.0.1:3002/" }, stderr_excerpt: null, stdout_excerpt: null }))
+  setFakeHandler("save_job", () => undefined)
+  setFakeHandler("check_service_health", () => { throw new Error("Unavailable probe") })
+  const view = render(<JobDetail plistPath={baseJob.plist_path} open onClose={vi.fn()} onEdit={vi.fn()} onRepair={vi.fn()} />)
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Apply Suggested Fix" }))
+  await screen.findByText(/Metadata saved; health verification failed/)
+  expect(getDetail).toHaveBeenCalledTimes(2)
+  expect(screen.getAllByText("http://127.0.0.1:3002/").length).toBeGreaterThan(0)
+  view.unmount()
+  resetFakeHandlers()
+})

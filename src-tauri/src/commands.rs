@@ -725,6 +725,7 @@ pub async fn save_job(plist_path: String, config: PlistConfig) -> Result<(), App
         Some(&plist_util::serialize_plist(&config)?),
         Some(&config.metadata),
         false,
+        Some(&agent),
     )
 }
 
@@ -750,6 +751,7 @@ pub async fn create_job(label: String, config: PlistConfig) -> Result<String, Ap
         Some(&bytes),
         Some(&config.metadata),
         true,
+        None,
     )?;
     Ok(path_str)
 }
@@ -769,6 +771,7 @@ pub async fn save_raw_plist(plist_path: String, xml: String) -> Result<(), AppEr
         Some(xml.as_bytes()),
         Some(&config.metadata),
         false,
+        Some(&agent),
     )
 }
 
@@ -781,7 +784,7 @@ pub async fn delete_job(plist_path: String, label: String) -> Result<(), AppErro
         agent.ensure_current()?;
         launchctl::bootout(&agent.path())?;
     }
-    service_overlays::transact_plist(&agent.path(), &label, None, None, false)
+    service_overlays::transact_plist(&agent.path(), &label, None, None, false, Some(&agent))
         .map_err(|error| AppError::Plist(format!("Deletion failed: {error}. Files are recovered or recovery is pending; a previously loaded service may remain stopped.")))
 }
 

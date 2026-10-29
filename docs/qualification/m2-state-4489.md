@@ -4,7 +4,7 @@ Milestone 2 of #4487, based on security branch `fix/daemonic-m1-security-4488` a
 
 ## Behavior and acceptance evidence
 
-- Native draft enum round trips cover all nine schedule/hour combinations and legacy enum spellings. Old payloads can omit metadata. Durable drafts omit command arguments, environment values and raw plist text, with a restoration notice. Historical legacy files are retained.
+- Native draft enum round trips cover all nine schedule/hour combinations and legacy enum spellings. Old payloads can omit metadata. Durable drafts omit command arguments, environment values and raw plist text, with a restoration notice and saving blocked until an authoritative reload or new draft. Historical legacy files are retained.
 - Private state writes serialize across processes, use bounded reads and synced atomic replacement. Concurrent read/modify/write tests retain all 80 updates. Serialization failure preserves the last snapshot. A private journal rolls back replacement, creation and deletion when paired metadata persistence fails; interrupted recovery and conflicting external edits are tested. External conflicts retain the journal and fail closed. File recovery does not restart a service stopped before a failed deletion.
 - UI preference saves coalesce and serialize, retain failed snapshots for retry, and flush before close/quit. A component test proves failed flush leaves the window visible. Malformed preference loading pauses autosave; explicit reload protects unsaved in-memory edits. Geometry is fitted to attached displays.
 - Deferred-response tests cover older lists, logs, details, diagnoses and saved forms finishing after a newer selection. Sensitive automatic-action stale-target tests remain from milestone 1. Partial bulk failure continues remaining jobs and refreshes the resulting list. Table sorting is controlled by persisted state.
@@ -18,9 +18,9 @@ Production compilation exposed that the previous `tsc --noEmit` script checked o
 
 ## Verification result
 
-Final source checks passed: 53 Rust tests, 105 frontend tests, `cargo clippy` with warnings denied, formatting, `tsc -b`, lint with zero warnings/errors, and a production app bundle. The app was not installed or launched. The frontend tests retain an existing Radix missing-description warning in JobDetail; Vite reports the approximately 508 KiB minified application chunk. Neither is a failing test or runtime acceptance claim.
+Final source checks passed: 56 Rust tests, 111 frontend tests, `cargo clippy` with warnings denied, formatting, `tsc -b`, lint with zero warnings/errors, and a production app bundle. The app was not installed or launched. The frontend tests retain an existing Radix missing-description warning in JobDetail; Vite reports the approximately 508 KiB minified application chunk. Neither is a failing test or runtime acceptance claim.
 
-Independent review and gate receipts are recorded in the issue journal and evidence directory after review completes.
+Independent review `584723f8-a7ea-405d-a7d0-007a936febd3` returned zero criticals and ten warnings. All ten received bounded corrections before the first gate push: retain the command's original file identity inside the transaction; reject raw invalid port elements; compact binary-safe base64 journal snapshots with maximum 1 MiB before/after fixtures; atomically exchange and validate displaced plists with a deterministic post-precheck race fixture; recover from rejected window geometry operations; invalidate delayed list edits on every form opening; refresh persisted metadata after failed health verification; block saving omitted restored drafts; reject invalid calendar bases before range expansion; and display both Day/Weekday OR constraints. The new dependency declaration promotes the already-locked base64 0.22.1 package; no transitive version changed. Review receipt and gate evidence are retained in the evidence directory.
 
 ## Original review disposition
 

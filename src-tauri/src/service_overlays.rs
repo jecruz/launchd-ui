@@ -43,9 +43,35 @@ const JOURNAL: &str = "pending-plist-transaction.json";
 struct Journal {
     path: String,
     label: String,
+    #[serde(with = "snapshot")]
     before: Option<Vec<u8>>,
+    #[serde(with = "snapshot")]
     after: Option<Vec<u8>>,
     overrides: Overrides,
+}
+
+// Compact binary-safe snapshots avoid JSON byte-array expansion at the plist limit.
+mod snapshot {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    /// Serialize an optional binary plist as compact base64.
+    pub fn serialize<S: Serializer>(
+        value: &Option<Vec<u8>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value
+            .as_ref()
+            .map(|bytes| STANDARD.encode(bytes))
+            .serialize(serializer)
+    }
+    /// Decode a journal snapshot without interpreting its plist format.
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<u8>>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|text| STANDARD.decode(text).map_err(serde::de::Error::custom))
+            .transpose()
+    }
 }
 
 fn load_at(directory: &Path, legacy: Option<&Path>) -> Result<Overrides, AppError> {
@@ -120,6 +146,7 @@ struct Change<'a> {
     after: Option<&'a [u8]>,
     metadata: Option<&'a LaunchControlMetadata>,
     create: bool,
+    expected: Option<&'a user_agent::CheckedAgent>,
 }
 
 fn transact_at(
@@ -135,10 +162,23 @@ fn transact_at(
         after,
         metadata,
         create,
+        expected,
     } = change;
     validate_target(root, path, label)?;
     state_io::locked(directory, || {
         recover_at(root, directory)?;
+        if let Some(expected) = expected {
+            if expected.path() != path || expected.config.label != label {
+                return Err(AppError::Plist("Transaction identity mismatch.".into()));
+            }
+            expected.ensure_current()?;
+        }
+        let observed = if create {
+            None
+        } else {
+            Some(user_agent::load_in(root, Path::new(path), Some(label))?)
+        };
+        let current = expected.or(observed.as_ref());
         let before = if create {
             match std::fs::symlink_metadata(path) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -146,7 +186,11 @@ fn transact_at(
                 Ok(_) => return Err(AppError::Plist("A job already exists at this path.".into())),
             }
         } else {
-            Some(user_agent::load_in(root, Path::new(path), Some(label))?.original_bytes()?)
+            Some(
+                current
+                    .ok_or_else(|| AppError::Plist("Missing original identity.".into()))?
+                    .original_bytes()?,
+            )
         };
         if let Some(after) = after {
             if plist_util::parse_plist_bytes(after)?.label != label {
@@ -169,10 +213,12 @@ fn transact_at(
                 Some(bytes) if create => {
                     user_agent::create_in(root, label, bytes)?;
                 }
-                Some(bytes) => {
-                    user_agent::load_in(root, Path::new(path), Some(label))?.write(bytes)?
-                }
-                None => user_agent::load_in(root, Path::new(path), Some(label))?.remove()?,
+                Some(bytes) => current
+                    .ok_or_else(|| AppError::Plist("Missing original identity.".into()))?
+                    .write(bytes)?,
+                None => current
+                    .ok_or_else(|| AppError::Plist("Missing original identity.".into()))?
+                    .remove()?,
             }
             let mut updated = overrides;
             match metadata {
@@ -217,6 +263,7 @@ pub fn transact_plist(
     after: Option<&[u8]>,
     metadata: Option<&LaunchControlMetadata>,
     create: bool,
+    expected: Option<&user_agent::CheckedAgent>,
 ) -> Result<(), AppError> {
     transact_at(
         &plist_util::get_user_agents_dir(),
@@ -228,6 +275,7 @@ pub fn transact_plist(
             after,
             metadata,
             create,
+            expected,
         },
         state_io::write,
     )
@@ -350,6 +398,76 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_replacement_between_command_validation_and_transaction_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("LaunchAgents");
+        let directory = temp.path().join("state");
+        let (path, before) = fixture(&root, "safe", "before");
+        let expected = user_agent::load_in(&root, Path::new(&path), None).unwrap();
+        let mut config = plist_util::parse_plist_bytes(&before).unwrap();
+        config.metadata.group = Some("external".into());
+        let external = plist_util::serialize_plist(&config).unwrap();
+        let other = root.join("other");
+        std::fs::write(&other, &external).unwrap();
+        std::fs::rename(other, &path).unwrap();
+        assert!(
+            transact_at(
+                &root,
+                &directory,
+                None,
+                Change {
+                    path: &path,
+                    label: "safe",
+                    after: Some(&before),
+                    metadata: None,
+                    create: false,
+                    expected: Some(&expected)
+                },
+                state_io::write
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), external);
+        assert!(!directory.join(JOURNAL).exists());
+    }
+
+    #[test]
+    fn journals_maximum_size_before_and_after_snapshots_without_expansion_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("LaunchAgents");
+        std::fs::create_dir(&root).unwrap();
+        let directory = temp.path().join("state");
+        let prefix = "<plist><dict><key>Label</key><string>safe</string><key>Payload</key><string>";
+        let suffix = "</string></dict></plist>";
+        let before = format!(
+            "{prefix}{}{suffix}",
+            "x".repeat(1024 * 1024 - prefix.len() - suffix.len())
+        )
+        .into_bytes();
+        let mut after = before.clone();
+        after[prefix.len()] = b'y';
+        let path = root.join("safe.plist").to_string_lossy().into_owned();
+        std::fs::write(&path, &before).unwrap();
+        transact_at(
+            &root,
+            &directory,
+            None,
+            Change {
+                path: &path,
+                label: "safe",
+                after: Some(&after),
+                metadata: Some(&LaunchControlMetadata::default()),
+                create: false,
+                expected: None,
+            },
+            state_io::write,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), after);
+        assert!(!directory.join(JOURNAL).exists());
+    }
+
+    #[test]
     fn complete_records_clear_fields_while_legacy_records_inherit() {
         let base = LaunchControlMetadata {
             group: Some("base".into()),
@@ -397,6 +515,7 @@ mod tests {
                     },
                     metadata: Some(&config.metadata),
                     create: creating,
+                    expected: None,
                 },
                 |_, _| Err(AppError::AgentRuntime("Injected overlay failure".into())),
             );

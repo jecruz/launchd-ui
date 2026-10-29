@@ -131,7 +131,9 @@ export function formatCalendarIntervals(intervals: CalendarInterval[]): string {
   const range = detectHourRange(intervals)
   if (range) {
     const parts: string[] = []
-    if (range.base.weekday !== null && range.base.weekday !== undefined) {
+    if (range.base.weekday != null && range.base.day != null) {
+      parts.push(`Every ${weekdayLabels[range.base.weekday % 7]} or day ${range.base.day} of each month`)
+    } else if (range.base.weekday !== null && range.base.weekday !== undefined) {
       parts.push(`Every ${weekdayLabels[range.base.weekday % 7]}`)
     } else if (range.base.day !== null && range.base.day !== undefined) {
       parts.push(`Day ${range.base.day} of each month`)
@@ -150,7 +152,9 @@ export function formatCalendarIntervals(intervals: CalendarInterval[]): string {
 
 function formatSingleCalendarInterval(ci: CalendarInterval): string {
   const parts: string[] = []
-  if (ci.weekday !== null && ci.weekday !== undefined) {
+  if (ci.weekday != null && ci.day != null) {
+    parts.push(`Every ${weekdayLabels[ci.weekday % 7]} or day ${ci.day} of each month`)
+  } else if (ci.weekday !== null && ci.weekday !== undefined) {
     parts.push(`Every ${weekdayLabels[ci.weekday % 7]}`)
   } else if (ci.day !== null && ci.day !== undefined) {
     parts.push(`Day ${ci.day} of each month`)

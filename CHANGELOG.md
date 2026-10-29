@@ -5,6 +5,8 @@
 ### Fixed
 
 - Make the typecheck command check referenced TypeScript projects, matching production compilation.
+- Preserve original plist identities through transactions and atomic exchange; reject competing replacements and retain unresolved conflicts for operator review.
+- Block saving incomplete restored drafts and validate raw port elements before conversion.
 - Serialize and atomically save private preferences and metadata; recover interrupted plist/metadata transactions and preserve conflicting external edits.
 - Omit command arguments, environment values, and raw plist content from durable drafts, with an explicit restoration notice.
 - Flush pending preferences on close/quit, expose persistence failures, recover off-screen windows, and reject stale detail, log, prompt, and form results.

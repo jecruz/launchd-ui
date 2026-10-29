@@ -161,12 +161,14 @@ export function JobDetail({ plistPath, open, onClose, onEdit, onRepair }: JobDet
     try {
       await saveJob(job.plist_path, { ...job.plist, metadata: { ...job.plist.metadata, ...diagnosis.suggested_metadata } })
       if (!current()) return
-      await checkServiceHealth(job.plist_path)
+      let verificationError: unknown
+      try { await checkServiceHealth(job.plist_path) } catch (error) { verificationError = error }
       if (!current()) return
       const refreshed = await getJobDetail(job.plist_path)
       if (!current()) return
       setJob(refreshed)
       await fetchDiagnosis(job.plist_path, generation)
+      if (verificationError && current()) setDiagnosisError(`Metadata saved; health verification failed: ${String(verificationError)}`)
     } catch (error) {
       if (current()) setDiagnosisError(String(error))
     } finally {

@@ -268,3 +268,9 @@ it("matches Day or Weekday and recognizes Sunday as weekday 7", () => {
   expect(occurrences.every((date) => date.getDay() === 0 || date.getDate() === day)).toBe(true)
   expect(formatCalendarIntervals([{ ...interval, day: null }])).toContain("Sunday")
 })
+
+it("formats both OR calendar constraints in single and hour-range schedules", () => {
+  const interval = { minute: 0, hour: 9, day: 15, weekday: 7, month: null }
+  expect(formatCalendarIntervals([interval])).toContain("Every Sunday or day 15 of each month")
+  expect(formatCalendarIntervals([interval, { ...interval, hour: 10 }])).toContain("Every Sunday or day 15 of each month")
+})

@@ -231,6 +231,19 @@ pub fn validate_raw_schedule(bytes: &[u8]) -> Result<(), AppError> {
         .as_dictionary()
         .ok_or_else(|| AppError::Plist("Invalid raw plist.".into()))?;
     let invalid = || AppError::Plist("Invalid launchd schedule integer or domain.".into());
+    if let Some(metadata) = dictionary.get("LaunchControl") {
+        let metadata = metadata.as_dictionary().ok_or_else(invalid)?;
+        if let Some(ports) = metadata.get("Ports") {
+            for port in ports.as_array().ok_or_else(invalid)? {
+                if !port
+                    .as_unsigned_integer()
+                    .is_some_and(|port| (1..=65535).contains(&port))
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+    }
     if let Some(value) = dictionary.get("StartInterval") {
         if !value
             .as_unsigned_integer()
@@ -532,7 +545,19 @@ mod tests {
             assert!(validate_raw_schedule(xml.as_bytes()).is_err());
         }
         let xml = b"<plist><dict><key>Label</key><string>safe</string><key>LaunchControl</key><dict><key>Ports</key><array><integer>65536</integer><integer>0</integer><integer>65535</integer></array></dict></dict></plist>";
-        assert_eq!(parse_plist_bytes(xml).unwrap().metadata.ports, vec![65535]);
+        assert!(validate_raw_schedule(xml).is_err());
+        for port in [
+            "<integer>0</integer>",
+            "<integer>65536</integer>",
+            "<integer>-1</integer>",
+            "<string>80</string>",
+            "<real>80.5</real>",
+        ] {
+            let xml = format!(
+                "<plist><dict><key>LaunchControl</key><dict><key>Ports</key><array>{port}</array></dict></dict></plist>"
+            );
+            assert!(validate_raw_schedule(xml.as_bytes()).is_err());
+        }
     }
 
     #[test]
