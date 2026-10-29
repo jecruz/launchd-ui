@@ -6,6 +6,8 @@ mod launchctl;
 mod plist_util;
 mod service_overlays;
 mod state_io;
+#[cfg(test)]
+mod test_support;
 mod types;
 mod user_agent;
 

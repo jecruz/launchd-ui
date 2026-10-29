@@ -10,12 +10,20 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
 
 pub fn get_user_agents_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some((catalog, _)) = crate::test_support::paths() {
+        return catalog;
+    }
     dirs::home_dir()
         .expect("could not find home directory")
         .join("Library/LaunchAgents")
 }
 
 fn plist_dirs() -> Vec<(PathBuf, JobSource)> {
+    #[cfg(test)]
+    if let Some((catalog, _)) = crate::test_support::paths() {
+        return vec![(catalog, JobSource::UserAgent)];
+    }
     let mut dirs = Vec::new();
     if let Some(home) = dirs::home_dir() {
         dirs.push((home.join("Library/LaunchAgents"), JobSource::UserAgent));

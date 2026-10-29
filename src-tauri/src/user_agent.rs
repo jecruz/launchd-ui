@@ -136,6 +136,10 @@ fn system_path(path: &Path) -> Result<PathBuf, AppError> {
 }
 
 fn open_directory(path: &Path) -> Result<File, AppError> {
+    open_directory_checked(path, None)
+}
+
+fn open_directory_checked(path: &Path, owner: Option<u32>) -> Result<File, AppError> {
     let path = system_path(path)?;
     if !path.is_absolute() {
         return Err(rejected());
@@ -150,8 +154,42 @@ fn open_directory(path: &Path) -> Result<File, AppError> {
             }
             _ => return Err(rejected()),
         }
+        if let Some(owner) = owner {
+            let metadata = directory.metadata()?;
+            if !metadata.is_dir()
+                || (metadata.uid() != owner && metadata.uid() != 0)
+                || (metadata.mode() & 0o022 != 0
+                    && !(metadata.uid() == 0 && metadata.mode() & 0o1000 != 0))
+            {
+                return Err(AppError::Plist("Log parents must be nonlinked directories owned by the plist owner or root, without untrusted write access.".into()));
+            }
+        }
     }
     Ok(directory)
+}
+
+fn open_log_read_with(
+    path: &Path,
+    owner: u32,
+    before_open: impl FnOnce() -> Result<(), AppError>,
+) -> Result<File, AppError> {
+    let directory = open_directory_checked(path.parent().ok_or_else(rejected)?, Some(owner))?;
+    let name =
+        CString::new(path.file_name().ok_or_else(rejected)?.as_bytes()).map_err(|_| rejected())?;
+    before_open()?;
+    let file = open_at(&directory, &name, libc::O_RDONLY)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != owner {
+        return Err(AppError::Plist(
+            "Logs must be single-link regular files owned by the validated plist owner.".into(),
+        ));
+    }
+    Ok(file)
+}
+
+/// Open a log without following symlinks, relative to a validated pinned parent.
+pub(crate) fn open_log_for_read(path: &str, owner: u32) -> Result<File, AppError> {
+    open_log_read_with(Path::new(path), owner, || Ok(()))
 }
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -460,6 +498,11 @@ pub(crate) struct CheckedPlist {
 }
 
 impl CheckedPlist {
+    /// Return the native-validated plist owner required for log descriptors.
+    pub(crate) fn owner(&self) -> u32 {
+        self.agent.identity.uid()
+    }
+
     /// Return configuration read from the pinned, bounded file descriptor.
     pub(crate) fn config(&self) -> &PlistConfig {
         &self.agent.config
@@ -621,6 +664,70 @@ pub fn validate_xml_label(xml: &str, label: &str) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_open_rejects_a_terminal_symlink_swap_after_pinning_the_parent() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("job.log");
+        let secret = root.path().join("private.txt");
+        std::fs::write(&log, "declared log").unwrap();
+        std::fs::write(&secret, "private sentinel").unwrap();
+        let owner = unsafe { libc::geteuid() };
+        let result = open_log_read_with(&log, owner, || {
+            std::fs::rename(&log, root.path().join("old.log"))?;
+            symlink(&secret, &log)?;
+            Ok(())
+        });
+        match result.unwrap_err() {
+            AppError::Io(error) => assert_eq!(error.raw_os_error(), Some(libc::ELOOP)),
+            error => panic!("expected a no-follow rejection, got {error}"),
+        }
+        assert!(open_log_for_read(log.to_str().unwrap(), owner).is_err());
+    }
+
+    #[test]
+    fn log_open_stays_relative_to_the_validated_parent_during_a_parent_swap() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("logs");
+        let other = root.path().join("other");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(parent.join("job.log"), "declared log").unwrap();
+        std::fs::write(other.join("job.log"), "private sentinel").unwrap();
+        let mut file =
+            open_log_read_with(&parent.join("job.log"), unsafe { libc::geteuid() }, || {
+                std::fs::rename(&parent, root.path().join("old-logs"))?;
+                symlink(&other, &parent)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "declared log");
+        assert!(
+            open_log_for_read(parent.join("job.log").to_str().unwrap(), unsafe {
+                libc::geteuid()
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn log_open_rejects_untrusted_parents_hardlinks_and_unexpected_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("job.log");
+        std::fs::write(&log, "declared log").unwrap();
+        let owner = unsafe { libc::geteuid() };
+        assert!(open_log_for_read(log.to_str().unwrap(), owner.wrapping_add(1)).is_err());
+        std::fs::hard_link(&log, root.path().join("alias")).unwrap();
+        assert!(open_log_for_read(log.to_str().unwrap(), owner).is_err());
+        std::fs::remove_file(root.path().join("alias")).unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(open_log_for_read(log.to_str().unwrap(), owner).is_err());
+    }
     use std::os::unix::fs::symlink;
 
     fn fixture(root: &Path, filename: &str, label: &str) -> PathBuf {

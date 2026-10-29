@@ -10,7 +10,6 @@ use crate::types::{
 };
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::fs::OpenOptionsExt;
 
 /// Complete an explicit quit only after the frontend has flushed its pending state.
 #[tauri::command]
@@ -28,12 +27,9 @@ fn current_epoch_millis() -> String {
     millis.to_string()
 }
 
-fn read_tail(path: &str, limit: usize) -> Result<(String, Option<String>), AppError> {
+fn read_tail(path: &str, owner: u32, limit: usize) -> Result<(String, Option<String>), AppError> {
     const MAX_BYTES: u64 = 256 * 1024;
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)?;
+    let mut file = crate::user_agent::open_log_for_read(path, owner)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(AppError::Plist("Logs must be regular files.".into()));
@@ -64,6 +60,7 @@ fn read_tail(path: &str, limit: usize) -> Result<(String, Option<String>), AppEr
 fn read_declared_log(
     config: &PlistConfig,
     path: &str,
+    owner: u32,
     limit: usize,
 ) -> Result<(String, Option<String>), AppError> {
     if ![&config.standard_out_path, &config.standard_error_path]
@@ -75,7 +72,7 @@ fn read_declared_log(
             "Requested log is not declared by its plist.".into(),
         ));
     }
-    read_tail(path, limit)
+    read_tail(path, owner, limit)
 }
 
 fn parse_program_port(program_arguments: Option<&Vec<String>>) -> Option<u16> {
@@ -475,7 +472,7 @@ fn read_checked_log(
     limit: usize,
 ) -> Result<(String, Option<String>), AppError> {
     checked.ensure_current()?;
-    let result = read_declared_log(checked.config(), path, limit);
+    let result = read_declared_log(checked.config(), path, checked.owner(), limit);
     checked.ensure_current()?;
     result
 }
@@ -1141,6 +1138,53 @@ mod tests {
     }
 
     #[test]
+    fn all_four_read_ipcs_accept_a_catalog_listed_user_fixture() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().canonicalize().unwrap();
+        let catalog = directory.join("LaunchAgents");
+        let state = directory.join("state");
+        std::fs::create_dir(&catalog).unwrap();
+        std::fs::create_dir(&state).unwrap();
+        std::fs::write(state.join("service-overrides.json"), "{}").unwrap();
+        let log = directory.join("job.log");
+        std::fs::write(&log, "fixture diagnostic log").unwrap();
+        let path = read_boundary_fixture(
+            &catalog,
+            "com.example.ipc-fixture",
+            &format!(
+                "<key>StandardErrorPath</key><string>{}</string>",
+                log.display()
+            ),
+        );
+        crate::test_support::with_paths(catalog, state.clone(), || {
+            tauri::async_runtime::block_on(async {
+                let detail = get_job_detail(path.clone()).await.unwrap();
+                assert_eq!(detail.label, "com.example.ipc-fixture");
+                assert!(matches!(detail.source, JobSource::UserAgent));
+                assert_eq!(detail.plist_path, path);
+                let health = check_service_health(path.clone()).await.unwrap();
+                assert_eq!(health.status, "unknown");
+                let diagnosis = diagnose_service(path.clone()).await.unwrap();
+                assert_eq!(diagnosis.health_status.as_deref(), Some("unknown"));
+                assert_eq!(
+                    diagnosis.stderr_excerpt.as_deref(),
+                    Some("fixture diagnostic log")
+                );
+                let read =
+                    read_log_file(log.to_string_lossy().into_owned(), path.clone(), Some(20))
+                        .await
+                        .unwrap();
+                assert_eq!(read.content, "fixture diagnostic log");
+            });
+        });
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(state.join("service-overrides.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved[&path]["health_status"], "unknown");
+        assert!(crate::test_support::paths().is_none());
+    }
+
+    #[test]
     fn detail_membership_also_requires_mutation_grade_containment_and_labels() {
         use std::os::unix::fs::symlink;
         let base = tempfile::tempdir().unwrap();
@@ -1361,9 +1405,13 @@ mod tests {
         let mut config: PlistConfig =
             serde_json::from_value(serde_json::json!({"label":"safe", "raw_xml":""})).unwrap();
         let path = file.path().to_str().unwrap();
-        assert!(read_declared_log(&config, path, 10).is_err());
+        let owner = unsafe { libc::geteuid() };
+        assert!(read_declared_log(&config, path, owner, 10).is_err());
         config.standard_out_path = Some(path.into());
-        assert_eq!(read_declared_log(&config, path, 10).unwrap().0, "log data");
+        assert_eq!(
+            read_declared_log(&config, path, owner, 10).unwrap().0,
+            "log data"
+        );
     }
 
     #[test]
@@ -1374,15 +1422,16 @@ mod tests {
         let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
         // SAFETY: name is a valid NUL-terminated path in a disposable fixture.
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        assert!(read_tail(fifo.to_str().unwrap(), 10).is_err());
+        let owner = unsafe { libc::geteuid() };
+        assert!(read_tail(fifo.to_str().unwrap(), owner, 10).is_err());
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut bytes = vec![b'x'; 1024 * 1024];
         bytes.extend_from_slice(b"\nlast\n\xffend\n");
         std::fs::write(file.path(), &bytes).unwrap();
-        let (text, _) = read_tail(file.path().to_str().unwrap(), 2).unwrap();
+        let (text, _) = read_tail(file.path().to_str().unwrap(), owner, 2).unwrap();
         assert_eq!(text, "last\n\u{fffd}end");
         assert!(
-            read_tail(file.path().to_str().unwrap(), 2000)
+            read_tail(file.path().to_str().unwrap(), owner, 2000)
                 .unwrap()
                 .0
                 .len()

@@ -45,6 +45,10 @@ pub fn parse_list_output(output: &str) -> Vec<LoadedService> {
 }
 
 pub fn list_loaded() -> Result<Vec<LoadedService>, AppError> {
+    #[cfg(test)]
+    if crate::test_support::paths().is_some() {
+        return Ok(Vec::new());
+    }
     let output = Command::new("/bin/launchctl")
         .arg("list")
         .output()

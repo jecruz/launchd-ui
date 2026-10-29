@@ -10,6 +10,10 @@ const LEGACY_APP_DIR_NAME: &str = "launchd-ui";
 const SERVICE_OVERRIDES_FILE_NAME: &str = "service-overrides.json";
 
 fn app_settings_dir() -> Result<PathBuf, AppError> {
+    #[cfg(test)]
+    if let Some((_, state)) = crate::test_support::paths() {
+        return Ok(state);
+    }
     let dir = dirs::config_dir()
         .ok_or_else(|| AppError::AgentRuntime("could not determine config directory".to_string()))?
         .join(APP_DIR_NAME);
