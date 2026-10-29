@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- Bind job details, health probes, diagnosis and log viewing to listed, owned, contained plist identities; validate before network I/O and read diagnosis logs only from the pinned owning plist's declarations.
+
 - Preserve explicit health URLs in repair suggestions and retain failed health results ahead of unrelated stderr context.
 
 - Keep explicit health destinations authoritative, preserve existing ports during repairs, and store health observations without freezing external plist metadata.

@@ -33,6 +33,15 @@ pub fn validate_label(label: &str) -> Result<(), AppError> {
 }
 
 fn path_in(root: &Path, path: &Path, must_exist: bool) -> Result<PathBuf, AppError> {
+    path_owned_in(root, path, must_exist, unsafe { libc::geteuid() })
+}
+
+fn path_owned_in(
+    root: &Path,
+    path: &Path,
+    must_exist: bool,
+    owner: u32,
+) -> Result<PathBuf, AppError> {
     if !path.is_absolute()
         || path.components().any(|c| matches!(c, Component::ParentDir))
         || path.extension().and_then(|s| s.to_str()) != Some("plist")
@@ -42,7 +51,7 @@ fn path_in(root: &Path, path: &Path, must_exist: bool) -> Result<PathBuf, AppErr
     let root_metadata = std::fs::symlink_metadata(root)?;
     if !root_metadata.is_dir()
         || root_metadata.file_type().is_symlink()
-        || root_metadata.uid() != unsafe { libc::geteuid() }
+        || root_metadata.uid() != owner
         || std::fs::symlink_metadata(root.parent().ok_or_else(rejected)?)?
             .file_type()
             .is_symlink()
@@ -397,13 +406,25 @@ pub(crate) fn load_in(
     path: &Path,
     label: Option<&str>,
 ) -> Result<CheckedAgent, AppError> {
-    let path = path_in(root, path, true)?;
+    load_owned_in(root, path, label, unsafe { libc::geteuid() })
+}
+
+fn load_owned_in(
+    root: &Path,
+    path: &Path,
+    label: Option<&str>,
+    owner: u32,
+) -> Result<CheckedAgent, AppError> {
+    let path = path_owned_in(root, path, true, owner)?;
     let directory = open_directory(path.parent().ok_or_else(rejected)?)?;
     let name =
         CString::new(path.file_name().ok_or_else(rejected)?.as_bytes()).map_err(|_| rejected())?;
     let mut file = open_at(&directory, &name, libc::O_RDONLY)?;
     let identity = file.metadata()?;
-    if !identity.is_file() || identity.nlink() != 1 || identity.uid() != directory.metadata()?.uid()
+    if !identity.is_file()
+        || identity.nlink() != 1
+        || identity.uid() != owner
+        || directory.metadata()?.uid() != owner
     {
         return Err(rejected());
     }
@@ -431,6 +452,39 @@ pub(crate) fn load_in(
     };
     agent.ensure_current()?;
     Ok(agent)
+}
+
+/// A validated read-only plist identity; exposes no mutation capability for system jobs.
+pub(crate) struct CheckedPlist {
+    agent: CheckedAgent,
+}
+
+impl CheckedPlist {
+    /// Return configuration read from the pinned, bounded file descriptor.
+    pub(crate) fn config(&self) -> &PlistConfig {
+        &self.agent.config
+    }
+
+    /// Return the canonical, validated owning plist path.
+    pub(crate) fn path(&self) -> String {
+        self.agent.path()
+    }
+
+    /// Reject replacement of the owning file or directory before further I/O.
+    pub(crate) fn ensure_current(&self) -> Result<(), AppError> {
+        self.agent.ensure_current()
+    }
+}
+
+/// Read a plist inside a native-selected root with its required owner and label binding.
+pub(crate) fn read_in(root: &Path, path: &Path, owner: u32) -> Result<CheckedPlist, AppError> {
+    let agent = load_owned_in(root, path, None, owner)?;
+    if owner == 0
+        && (agent.directory.metadata()?.mode() & 0o022 != 0 || agent.identity.mode() & 0o022 != 0)
+    {
+        return Err(rejected());
+    }
+    Ok(CheckedPlist { agent })
 }
 
 /// Load a user agent and retain its descriptor-bound identity until mutation.
@@ -608,6 +662,19 @@ mod tests {
             load_in(root.path(), &path, None).unwrap().config.label,
             "safe"
         );
+    }
+
+    #[test]
+    fn read_only_identity_requires_the_native_selected_owner_and_stays_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path(), "safe.plist", "safe");
+        let owner = unsafe { libc::geteuid() };
+        assert!(read_in(root.path(), &path, owner.wrapping_add(1)).is_err());
+        let read = read_in(root.path(), &path, owner).unwrap();
+        assert_eq!(read.config().label, "safe");
+        let replacement = fixture(root.path(), "replacement.plist", "safe");
+        std::fs::rename(replacement, &path).unwrap();
+        assert!(read.ensure_current().is_err());
     }
 
     #[test]

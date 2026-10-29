@@ -228,3 +228,5 @@ The integration branch for Redmine #4490 includes upstream `d0ea653` (eight comm
 ### Historical DB2 examples
 
 `src-tauri/src/db2_missing_index_examples.json` is retained byte-for-byte as historical user material. It is unrelated to Daemonic's launchd features, is not loaded by the app, and is not configured as a bundled resource. Its performance claims are unvalidated; six examples reference undefined SQL and nine index names collide. Do not execute the examples or use them as a qualified training/benchmark corpus. This milestone preserves the file in place rather than moving or deleting it. See `docs/qualification/db2-scope.md`.
+
+Read IPCs for job details, health, diagnosis and log viewing require a listed, validated owning plist. User paths follow the mutation containment and filename/label rules; system jobs stay read-only. Health validates identity before network I/O, and diagnosis reads only declared logs from the pinned owner. Unlisted, linked, replaced or mislabeled plists are rejected. Remaining review follow-ups are assigned in `docs/qualification/m3-followups.md`.

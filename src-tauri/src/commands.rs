@@ -78,13 +78,6 @@ fn read_declared_log(
     read_tail(path, limit)
 }
 
-fn tail_file(path: &str, limit: usize) -> Option<String> {
-    read_tail(path, limit)
-        .ok()
-        .map(|(content, _)| content)
-        .filter(|content| !content.trim().is_empty())
-}
-
 fn parse_program_port(program_arguments: Option<&Vec<String>>) -> Option<u16> {
     let args = program_arguments?;
     let mut iter = args.iter().peekable();
@@ -387,14 +380,48 @@ pub async fn list_jobs() -> Result<Vec<JobListEntry>, AppError> {
     Ok(entries)
 }
 
-#[tauri::command]
-pub async fn get_job_detail(plist_path: String) -> Result<LaunchdJob, AppError> {
-    service_overlays::recover_pending()?;
-    if !std::path::Path::new(&plist_path).exists() {
-        return Err(AppError::NotFound(plist_path));
-    }
+fn listed_plist_in(
+    plist_path: &str,
+    listed: &[(String, JobSource)],
+    user_root: &std::path::Path,
+) -> Result<(JobSource, crate::user_agent::CheckedPlist), AppError> {
+    let source = listed
+        .iter()
+        .find(|(known, _)| known == plist_path)
+        .map(|(_, source)| source.clone())
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "Owner must be a listed launchd plist: {plist_path}"
+            ))
+        })?;
+    let (root, owner) = match source {
+        JobSource::UserAgent => (user_root, unsafe { libc::geteuid() }),
+        JobSource::SystemAgent => (std::path::Path::new("/Library/LaunchAgents"), 0),
+        JobSource::SystemDaemon => (std::path::Path::new("/Library/LaunchDaemons"), 0),
+    };
+    let checked = crate::user_agent::read_in(root, std::path::Path::new(plist_path), owner)?;
+    Ok((source, checked))
+}
 
-    let plist = plist_util::parse_plist(&plist_path)?;
+fn listed_plist(
+    plist_path: &str,
+) -> Result<(JobSource, crate::user_agent::CheckedPlist), AppError> {
+    listed_plist_in(
+        plist_path,
+        &plist_util::scan_plist_files(),
+        &plist_util::get_user_agents_dir(),
+    )
+}
+
+fn detail_for_plist(
+    source: JobSource,
+    checked: &crate::user_agent::CheckedPlist,
+) -> Result<LaunchdJob, AppError> {
+    checked.ensure_current()?;
+    service_overlays::recover_pending()?;
+    checked.ensure_current()?;
+    let plist_path = checked.path();
+    let plist = checked.config().clone();
     let metadata = service_overlays::merge_metadata_by_path(&plist_path, &plist.metadata)?;
     let loaded = launchctl::list_loaded().unwrap_or_default();
 
@@ -411,15 +438,8 @@ pub async fn get_job_detail(plist_path: String) -> Result<LaunchdJob, AppError> 
         None => (JobStatus::Unloaded, None, None),
     };
 
-    let source = if plist_path.contains("/Library/LaunchDaemons") {
-        crate::types::JobSource::SystemDaemon
-    } else if plist_path.starts_with("/Library/LaunchAgents") {
-        crate::types::JobSource::SystemAgent
-    } else {
-        crate::types::JobSource::UserAgent
-    };
-
     let last_run_at = get_last_run_at(&plist);
+    checked.ensure_current()?;
     Ok(LaunchdJob {
         label: plist.label.clone(),
         plist_path,
@@ -430,6 +450,47 @@ pub async fn get_job_detail(plist_path: String) -> Result<LaunchdJob, AppError> 
         plist: PlistConfig { metadata, ..plist },
         last_run_at,
     })
+}
+
+/// Return details only for a listed plist with the same containment and identity checks as mutations.
+#[tauri::command]
+pub async fn get_job_detail(plist_path: String) -> Result<LaunchdJob, AppError> {
+    let (source, checked) = listed_plist(&plist_path)?;
+    detail_for_plist(source, &checked)
+}
+
+fn probe_checked_health(
+    checked: &crate::user_agent::CheckedPlist,
+    job: &LaunchdJob,
+) -> Result<(String, String), AppError> {
+    checked.ensure_current()?;
+    let result = run_health_check_command(&job.label, &job.plist, &job.plist.metadata);
+    checked.ensure_current()?;
+    result
+}
+
+fn read_checked_log(
+    checked: &crate::user_agent::CheckedPlist,
+    path: &str,
+    limit: usize,
+) -> Result<(String, Option<String>), AppError> {
+    checked.ensure_current()?;
+    let result = read_declared_log(checked.config(), path, limit);
+    checked.ensure_current()?;
+    result
+}
+
+fn diagnosis_excerpt(
+    checked: &crate::user_agent::CheckedPlist,
+    path: Option<&str>,
+    limit: usize,
+) -> Result<Option<String>, AppError> {
+    let Some(path) = path else { return Ok(None) };
+    match read_checked_log(checked, path, limit) {
+        Ok((content, _)) => Ok((!content.trim().is_empty()).then_some(content)),
+        Err(AppError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn candidate_health_urls(
@@ -879,22 +940,17 @@ pub struct HealthCheckResult {
 
 #[tauri::command]
 pub async fn check_service_health(plist_path: String) -> Result<HealthCheckResult, AppError> {
-    let job = get_job_detail(plist_path.clone()).await?;
-    let probe_job = job.clone();
-    let (status, detail) = tauri::async_runtime::spawn_blocking(move || {
-        run_health_check_command(
-            &probe_job.label,
-            &probe_job.plist,
-            &probe_job.plist.metadata,
-        )
+    let (source, checked) = listed_plist(&plist_path)?;
+    let job = detail_for_plist(source, &checked)?;
+    let (checked, status, detail) = tauri::async_runtime::spawn_blocking(move || {
+        let (status, detail) = probe_checked_health(&checked, &job)?;
+        Ok::<_, AppError>((checked, status, detail))
     })
     .await
     .map_err(|_| AppError::AgentRuntime("Health probe worker failed.".into()))??;
     let checked_at = current_epoch_millis();
-    if job.source == crate::types::JobSource::UserAgent {
-        crate::user_agent::load(&plist_path, Some(&job.label))?;
-    }
-    service_overlays::record_health(&plist_path, &status, &detail, &checked_at)?;
+    checked.ensure_current()?;
+    service_overlays::record_health(&checked.path(), &status, &detail, &checked_at)?;
     Ok(HealthCheckResult {
         status,
         detail,
@@ -904,17 +960,15 @@ pub async fn check_service_health(plist_path: String) -> Result<HealthCheckResul
 
 #[tauri::command]
 pub async fn diagnose_service(plist_path: String) -> Result<ServiceDiagnosis, AppError> {
-    let job = get_job_detail(plist_path.clone()).await?;
-    let stderr_excerpt = job
-        .plist
-        .standard_error_path
-        .as_ref()
-        .and_then(|path| tail_file(path, 40));
-    let stdout_excerpt = job
-        .plist
-        .standard_out_path
-        .as_ref()
-        .and_then(|path| tail_file(path, 20));
+    let (source, checked) = listed_plist(&plist_path)?;
+    let job = detail_for_plist(source, &checked)?;
+    let stderr_excerpt = diagnosis_excerpt(
+        &checked,
+        checked.config().standard_error_path.as_deref(),
+        40,
+    )?;
+    let stdout_excerpt =
+        diagnosis_excerpt(&checked, checked.config().standard_out_path.as_deref(), 20)?;
     let mut diagnosis = suggest_repair(&job, stderr_excerpt.as_deref(), stdout_excerpt.as_deref());
 
     if diagnosis.health_status.is_none() {
@@ -933,22 +987,15 @@ pub struct LogFileResult {
     modified_at: Option<String>,
 }
 
+/// Read only a log declared by a listed, contained, descriptor-pinned owning plist.
 #[tauri::command]
 pub async fn read_log_file(
     path: String,
     plist_path: String,
     tail_lines: Option<usize>,
 ) -> Result<LogFileResult, AppError> {
-    if !plist_util::scan_plist_files()
-        .iter()
-        .any(|(known, _)| known == &plist_path)
-    {
-        return Err(AppError::Plist(
-            "Log owner must be a listed launchd plist.".into(),
-        ));
-    }
-    let config = plist_util::parse_plist(&plist_path)?;
-    let (content, modified_at) = read_declared_log(&config, &path, tail_lines.unwrap_or(200))?;
+    let (_, checked) = listed_plist(&plist_path)?;
+    let (content, modified_at) = read_checked_log(&checked, &path, tail_lines.unwrap_or(200))?;
     Ok(LogFileResult {
         content,
         modified_at,
@@ -1082,6 +1129,186 @@ pub async fn apply_approved_agent_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn read_boundary_fixture(root: &std::path::Path, label: &str, extra: &str) -> String {
+        let path = root.join(format!("{label}.plist"));
+        std::fs::write(
+            &path,
+            format!("<plist><dict><key>Label</key><string>{label}</string>{extra}</dict></plist>"),
+        )
+        .unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn detail_membership_also_requires_mutation_grade_containment_and_labels() {
+        use std::os::unix::fs::symlink;
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("LaunchAgents");
+        std::fs::create_dir(&root).unwrap();
+        let path = read_boundary_fixture(&root, "safe", "");
+        let listed = vec![(path.clone(), JobSource::UserAgent)];
+        assert!(listed_plist_in(&path, &[], &root).is_err());
+        let (_, checked) = listed_plist_in(&path, &listed, &root).unwrap();
+        assert_eq!(checked.config().label, "safe");
+        let outside = read_boundary_fixture(base.path(), "outside", "");
+        for bad in [
+            outside.clone(),
+            format!("{}/../outside.plist", root.display()),
+        ] {
+            assert!(listed_plist_in(&bad, &[(bad.clone(), JobSource::UserAgent)], &root).is_err());
+        }
+        let linked = root.join("linked.plist").to_string_lossy().into_owned();
+        symlink(&outside, &linked).unwrap();
+        assert!(
+            listed_plist_in(&linked, &[(linked.clone(), JobSource::UserAgent)], &root).is_err()
+        );
+        std::fs::write(
+            &path,
+            "<plist><dict><key>Label</key><string>other</string></dict></plist>",
+        )
+        .unwrap();
+        assert!(listed_plist_in(&path, &listed, &root).is_err());
+        read_boundary_fixture(&root, "safe", "");
+        std::fs::hard_link(&path, base.path().join("hard-link.plist")).unwrap();
+        assert!(listed_plist_in(&path, &listed, &root).is_err());
+    }
+
+    #[test]
+    fn all_three_read_ipcs_reject_unlisted_plists_without_probe_or_log_disclosure() {
+        let root = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let secret = root.path().join("not-a-job.log");
+        std::fs::write(&secret, "fixture-private-sentinel").unwrap();
+        let path = read_boundary_fixture(
+            root.path(),
+            "unlisted",
+            &format!(
+                "<key>StandardErrorPath</key><string>{}</string><key>LaunchControl</key><dict><key>HealthCheckURL</key><string>http://{}/health</string></dict>",
+                secret.display(),
+                listener.local_addr().unwrap()
+            ),
+        );
+        let parsed = plist_util::parse_plist(&path).unwrap();
+        assert_eq!(
+            parsed.metadata.health_check_url.as_deref(),
+            Some(format!("http://{}/health", listener.local_addr().unwrap()).as_str())
+        );
+        assert_eq!(parsed.standard_error_path.as_deref(), secret.to_str());
+        // Use the actual native IPC entry points; rejection precedes state recovery and launchctl reads.
+        tauri::async_runtime::block_on(async {
+            assert!(get_job_detail(path.clone()).await.is_err());
+            assert!(check_service_health(path.clone()).await.is_err());
+            let error = diagnose_service(path).await.unwrap_err().to_string();
+            assert!(error.contains("listed"));
+            assert!(!error.contains("fixture-private-sentinel"));
+        });
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn health_rejects_a_replaced_user_identity_before_any_network_probe() {
+        let root = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let path = read_boundary_fixture(root.path(), "safe", "");
+        let (_, checked) =
+            listed_plist_in(&path, &[(path.clone(), JobSource::UserAgent)], root.path()).unwrap();
+        let mut job: LaunchdJob = serde_json::from_value(serde_json::json!({"label":"safe", "plist_path":path, "source":"UserAgent", "status":"Running", "pid":123, "last_exit_code":null, "last_run_at":null, "plist":{"label":"safe", "raw_xml":""}})).unwrap();
+        job.plist.metadata.health_check_url =
+            Some(format!("http://{}/health", listener.local_addr().unwrap()));
+        let replacement = read_boundary_fixture(root.path(), "replacement", "");
+        std::fs::rename(replacement, &path).unwrap();
+        assert!(probe_checked_health(&checked, &job).is_err());
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn diagnosis_reads_only_the_pinned_owners_declared_log_and_rejects_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let declared = root.path().join("declared.log");
+        let other = root.path().join("other.log");
+        std::fs::write(&declared, "declared fixture log").unwrap();
+        std::fs::write(&other, "unrelated fixture log").unwrap();
+        let path = read_boundary_fixture(
+            root.path(),
+            "safe",
+            &format!(
+                "<key>StandardErrorPath</key><string>{}</string>",
+                declared.display()
+            ),
+        );
+        let (_, checked) =
+            listed_plist_in(&path, &[(path.clone(), JobSource::UserAgent)], root.path()).unwrap();
+        assert_eq!(
+            diagnosis_excerpt(&checked, Some(declared.to_str().unwrap()), 40)
+                .unwrap()
+                .as_deref(),
+            Some("declared fixture log")
+        );
+        assert!(diagnosis_excerpt(&checked, Some(other.to_str().unwrap()), 40).is_err());
+        let replacement = read_boundary_fixture(root.path(), "replacement", "");
+        std::fs::rename(replacement, &path).unwrap();
+        assert!(diagnosis_excerpt(&checked, Some(declared.to_str().unwrap()), 40).is_err());
+    }
+
+    #[test]
+    fn log_viewer_rejects_unlisted_linked_and_replaced_owners() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("declared.log");
+        std::fs::write(&log, "fixture-private-log-sentinel").unwrap();
+        let path = read_boundary_fixture(
+            root.path(),
+            "safe",
+            &format!(
+                "<key>StandardOutPath</key><string>{}</string>",
+                log.display()
+            ),
+        );
+        let error = tauri::async_runtime::block_on(read_log_file(
+            log.to_string_lossy().into_owned(),
+            path.clone(),
+            Some(20),
+        ))
+        .err()
+        .expect("unlisted log owner must be rejected")
+        .to_string();
+        assert!(error.contains("listed"));
+        assert!(!error.contains("fixture-private-log-sentinel"));
+        let linked = root
+            .path()
+            .join("linked.plist")
+            .to_string_lossy()
+            .into_owned();
+        symlink(&path, &linked).unwrap();
+        assert!(
+            listed_plist_in(
+                &linked,
+                &[(linked.clone(), JobSource::UserAgent)],
+                root.path()
+            )
+            .is_err()
+        );
+        let (_, checked) =
+            listed_plist_in(&path, &[(path.clone(), JobSource::UserAgent)], root.path()).unwrap();
+        assert_eq!(
+            read_checked_log(&checked, log.to_str().unwrap(), 20)
+                .unwrap()
+                .0,
+            "fixture-private-log-sentinel"
+        );
+        let replacement = read_boundary_fixture(root.path(), "replacement", "");
+        std::fs::rename(replacement, &path).unwrap();
+        assert!(read_checked_log(&checked, log.to_str().unwrap(), 20).is_err());
+    }
 
     #[test]
     fn start_distinguishes_loaded_and_running_without_a_stop() {

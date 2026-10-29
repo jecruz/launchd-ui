@@ -1,0 +1,15 @@
+# Bounded read-IPC security correction — #4490
+
+Approved by orchestrator %202 after the first M3 gate. Base: integration tip `a308550`. Scope is exactly the three original read-boundary corrections plus the explicitly approved `read_log_file` containment correction and their negative tests; other findings are allocated in `m3-followups.md` and remain unfixed.
+
+1. `get_job_detail` requires exact catalog membership and a validated direct-child plist with filename/Label binding, expected native owner, no traversal, symlinks or hardlinks, a bounded pinned read and retained file/directory identity. User jobs use the mutation validator's rules. Listed system jobs remain read-only under the two native system roots and require root ownership with no group/world write permission. The read guard exposes no mutation methods.
+2. Health loads that validated identity before building details or entering the probe worker. The worker checks the pinned identity immediately before any network request and again afterward. Observation persistence checks it once more. Root/source comes from the native catalog, not pathname substring classification.
+3. Diagnosis requires the same membership and pinned identity. Each log must be declared by that pinned owning plist, with identity checks around bounded reading. A missing declared file remains an absent excerpt; invalid ownership/declarations and other read failures are returned rather than converted to apparently successful diagnostics.
+
+4. `read_log_file` uses the same native catalog lookup and pinned containment guard. It passes the pinned owner configuration to the declared-log reader, without reparsing the owner by pathname.
+
+Negative coverage: unlisted existing plist rejected by all three actual native IPC entry points; a valid loopback URL in that rejected plist receives zero connections and its log sentinel is not disclosed; listed traversal/outside paths, symlinks, hardlinks, mismatched labels and wrong expected owner are rejected; replacing a validated user plist prevents the probe from connecting; diagnosis rejects undeclared logs and post-validation replacement. A valid pinned declared log remains readable in an isolated fixture. A separate log-viewer regression rejects an unlisted owner at the actual IPC, rejects a listed symlink through the shared loader, and rejects an owner replaced after validation; the pinned valid log remains readable. Tests never modify the real LaunchAgents directory or launch Daemonic.
+
+Verification: 72 Rust tests, rustfmt, Clippy with warnings denied, and uninstalled production app build pass through heavy-op. Build includes TypeScript compilation and Vite. The prior 137 frontend and 27 release-script test receipts remain unchanged; frontend logic and release tooling are not changed or retested in this native-only round. Normal gate and remote verification are pending.
+
+No rescue or main merge, installation, app launch, CI dispatch or release is authorized. M4 install and M5 real-runtime acceptance still require separate user authorization. Safe to launch: NO; packaging and runtime follow-ups remain open.
