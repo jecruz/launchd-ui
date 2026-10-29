@@ -507,13 +507,7 @@ fn suggest_repair(
         likely_causes.push(format!(
             "Uptime Kuma usually serves HTTP on port {declared_port}."
         ));
-        if metadata.health_check_url.is_none()
-            || metadata
-                .health_check_url
-                .as_deref()
-                .map(|value| !value.contains(&declared_port.to_string()))
-                .unwrap_or(true)
-        {
+        if metadata.health_check_url.is_none() {
             suggestions.push(ServiceRepairSuggestion {
                 title: "Set a health URL".to_string(),
                 detail: format!(
@@ -565,6 +559,14 @@ fn suggest_repair(
         } else {
             "The service is healthy.".to_string()
         }
+    } else if metadata.health_status.as_deref() == Some("unhealthy") {
+        format!(
+            "The service is unhealthy. {}",
+            metadata
+                .health_detail
+                .as_deref()
+                .unwrap_or("The configured health check failed.")
+        )
     } else if let Some(stderr) = stderr_excerpt {
         if stderr_lower.contains("connection refused") {
             "The service is failing a health check or cannot be reached on its expected port."
@@ -622,7 +624,10 @@ fn suggest_repair(
                 .environment
                 .clone()
                 .or_else(|| Some("local".to_string())),
-            health_check_url: Some(format!("http://127.0.0.1:{declared_port}/")),
+            health_check_url: metadata
+                .health_check_url
+                .clone()
+                .or_else(|| Some(format!("http://127.0.0.1:{declared_port}/"))),
             health_check_command: metadata.health_check_command.clone(),
             ports: {
                 let mut ports = metadata.ports.clone();
@@ -1355,6 +1360,36 @@ mod tests {
             Some("http://127.0.0.1:3002/health")
         );
         assert!(urls.iter().any(|url| url == "http://127.0.0.1:3001/health"));
+    }
+
+    #[test]
+    fn repair_preserves_explicit_health_destination_and_failed_health_summary() {
+        let plist: PlistConfig = serde_json::from_value(serde_json::json!({"label":"uptime-kuma", "raw_xml":"", "program_arguments":["service", "--port=3002"], "metadata":{"health_check_url":"http://127.0.0.1:9999/custom", "health_status":"unhealthy", "health_detail":"HTTP 503"}})).unwrap();
+        let mut job = LaunchdJob {
+            label: plist.label.clone(),
+            plist_path: "unused".into(),
+            source: JobSource::UserAgent,
+            status: JobStatus::Running,
+            pid: Some(1234),
+            last_exit_code: None,
+            plist,
+            last_run_at: None,
+        };
+        job.plist.metadata.last_health_check_at = Some(current_epoch_millis());
+        let diagnosis = suggest_repair(&job, Some("unrelated historical diagnostic"), None);
+        assert!(diagnosis.summary.contains("unhealthy"));
+        assert!(diagnosis.summary.contains("HTTP 503"));
+        assert_eq!(
+            diagnosis.suggested_metadata.unwrap().health_check_url,
+            job.plist.metadata.health_check_url
+        );
+        job.label = "ordinary-service".into();
+        job.plist.metadata.health_status = Some("unknown".into());
+        assert!(
+            suggest_repair(&job, Some("unrelated historical diagnostic"), None)
+                .summary
+                .contains("Health is unknown")
+        );
     }
 
     #[test]

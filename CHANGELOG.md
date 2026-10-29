@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Preserve explicit health URLs in repair suggestions and retain failed health results ahead of unrelated stderr context.
+
 - Keep explicit health destinations authoritative, preserve existing ports during repairs, and store health observations without freezing external plist metadata.
 - Reject empty or misspelled calendar schedules, label the Monday preset accurately, and include month constraints in schedule descriptions.
 - Report saved metadata separately from failed refreshes and show repair suggestions independently of cached health status.
