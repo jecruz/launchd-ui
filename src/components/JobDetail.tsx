@@ -10,9 +10,18 @@ import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { LogViewer } from "@/components/LogViewer"
-import type { LaunchdJob } from "@/types"
-import { getJobDetail, revealInFinder } from "@/lib/invoke"
-import { FolderOpen } from "lucide-react"
+import { CopyableCodeBlock, CopyableInlineText } from "@/components/CopyableBlock"
+import { deriveHealthText } from "@/lib/health"
+import { formatEpochMillis24 } from "@/lib/time"
+import type { LaunchdJob, ServiceDiagnosis, ServiceRepairSuggestion } from "@/types"
+import {
+  checkServiceHealth,
+  diagnoseService,
+  getJobDetail,
+  revealInFinder,
+  saveJob,
+} from "@/lib/invoke"
+import { AlertTriangle, CheckCircle2, FolderOpen, Wrench } from "lucide-react"
 import { formatCalendarIntervals } from "@/lib/calendar-utils"
 
 type JobDetailProps = {
@@ -20,6 +29,7 @@ type JobDetailProps = {
   open: boolean
   onClose: () => void
   onEdit: (job: LaunchdJob) => void
+  onRepair: (job: LaunchdJob, diagnosis: ServiceDiagnosis | null) => void
 }
 
 function DetailRow({ label, value }: { label: string; value: string | null | undefined }) {
@@ -32,25 +42,167 @@ function DetailRow({ label, value }: { label: string; value: string | null | und
   )
 }
 
-export function JobDetail({ plistPath, open, onClose, onEdit }: JobDetailProps) {
+function healthLabel(job: LaunchdJob) {
+  const text = deriveHealthText({
+    status: job.status,
+    last_exit_code: job.last_exit_code,
+    metadata: job.plist.metadata,
+  })
+  if (text === "Healthy") return "Healthy"
+  if (text === "Attention") return "Needs attention"
+  return text
+}
+
+function hasExplicitHealthCheck(job: LaunchdJob) {
+  return Boolean(job.plist.metadata.health_check_url || job.plist.metadata.health_check_command)
+}
+
+const suggestionKindOrder: Record<string, number> = {
+  metadata: 0,
+  template: 1,
+  plist: 2,
+}
+
+function sortLikelyCauses(likelyCauses: string[]) {
+  return [...likelyCauses].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
+}
+
+function sortSuggestions(suggestions: ServiceRepairSuggestion[]) {
+  return [...suggestions].sort((a, b) => {
+    const kindA = suggestionKindOrder[a.kind] ?? Number.MAX_SAFE_INTEGER
+    const kindB = suggestionKindOrder[b.kind] ?? Number.MAX_SAFE_INTEGER
+    if (kindA !== kindB) return kindA - kindB
+    const titleComparison = a.title.localeCompare(b.title, undefined, { sensitivity: "base" })
+    if (titleComparison !== 0) return titleComparison
+    return a.detail.localeCompare(b.detail, undefined, { sensitivity: "base" })
+  })
+}
+
+export function JobDetail({ plistPath, open, onClose, onEdit, onRepair }: JobDetailProps) {
   const [job, setJob] = useState<LaunchdJob | null>(null)
   const [loading, setLoading] = useState(false)
+  const [checkingHealth, setCheckingHealth] = useState(false)
+  const [healthMessage, setHealthMessage] = useState<string | null>(null)
+  const [diagnosisLoading, setDiagnosisLoading] = useState(false)
+  const [diagnosisError, setDiagnosisError] = useState<string | null>(null)
+  const [diagnosis, setDiagnosis] = useState<ServiceDiagnosis | null>(null)
 
   useEffect(() => {
     if (!plistPath || !open) return
     setLoading(true)
+    setHealthMessage(null)
+    setDiagnosisError(null)
     getJobDetail(plistPath)
-      .then(setJob)
+      .then(async (loaded) => {
+        setJob(loaded)
+        try {
+          setDiagnosisLoading(true)
+          const result = await diagnoseService(plistPath)
+          setDiagnosis(result)
+        } catch (error) {
+          setDiagnosisError(String(error))
+          setDiagnosis(null)
+        } finally {
+          setDiagnosisLoading(false)
+        }
+      })
       .catch(() => setJob(null))
       .finally(() => setLoading(false))
   }, [plistPath, open])
+
+  const handleCheckHealth = async () => {
+    if (!job) return
+    setCheckingHealth(true)
+    setHealthMessage(null)
+    try {
+      const result = await checkServiceHealth(job.plist_path)
+      setHealthMessage(`${result.status}: ${result.detail}`)
+      const refreshed = await getJobDetail(job.plist_path)
+      setJob(refreshed)
+      const updatedDiagnosis = await diagnoseService(job.plist_path)
+      setDiagnosis(
+        result.status === "healthy"
+          ? {
+              ...updatedDiagnosis,
+              summary: `The service is healthy. ${result.detail}`,
+              likely_causes: [],
+              suggestions: [],
+              stderr_excerpt: null,
+              stdout_excerpt: null,
+              health_status: result.status,
+              health_detail: result.detail,
+              suggested_metadata: null,
+            }
+          : updatedDiagnosis
+      )
+    } catch (error) {
+      setHealthMessage(String(error))
+    } finally {
+      setCheckingHealth(false)
+    }
+  }
+
+  const handleRefreshDiagnosis = async () => {
+    if (!job) return
+    setDiagnosisLoading(true)
+    setDiagnosisError(null)
+    try {
+      const result = await diagnoseService(job.plist_path)
+      setDiagnosis(result)
+    } catch (error) {
+      setDiagnosisError(String(error))
+    } finally {
+      setDiagnosisLoading(false)
+    }
+  }
+
+  const handleApplySuggestedMetadata = async () => {
+    if (!job?.plist.metadata || !diagnosis?.suggested_metadata) return
+    const nextPlist = {
+      ...job.plist,
+      metadata: {
+        ...job.plist.metadata,
+        ...diagnosis.suggested_metadata,
+      },
+    }
+    await saveJob(job.plist_path, nextPlist)
+    await checkServiceHealth(job.plist_path).catch(() => undefined)
+    const refreshed = await getJobDetail(job.plist_path)
+    setJob(refreshed)
+    const result = await diagnoseService(job.plist_path)
+    setDiagnosis(result)
+  }
+
+  const noExplicitHealthCheck =
+    Boolean(job) &&
+    job?.plist.metadata.health_status === "unknown" &&
+    !hasExplicitHealthCheck(job)
+  const showRepairButton =
+    job?.source === "UserAgent" &&
+    Boolean(diagnosis?.suggested_metadata || (diagnosis?.suggestions?.length ?? 0) > 0)
+  const hasRepairSignals =
+    Boolean(diagnosis) &&
+    (diagnosis?.health_status === "unhealthy" ||
+      (diagnosis?.likely_causes?.length ?? 0) > 0 ||
+      (diagnosis?.suggestions?.length ?? 0) > 0)
+  const repairSectionTitle = noExplicitHealthCheck || !hasRepairSignals ? "Health" : "Repair"
+  const likelyCauses = diagnosis ? sortLikelyCauses(diagnosis.likely_causes) : []
+  const suggestions = diagnosis ? sortSuggestions(diagnosis.suggestions) : []
 
   return (
     <Sheet open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
       <SheetContent className="w-[600px] sm:w-[640px] sm:max-w-[640px] overflow-y-auto p-0">
         <SheetHeader>
           <SheetTitle className="text-base font-semibold">
-            {job?.label ?? "Loading..."}
+            {job ? (
+              <CopyableInlineText
+                text={job.label}
+                copyLabel={`Copy label ${job.label}`}
+                className="text-base font-semibold"
+              />
+            ) : (
+              "Loading..."
+            )}
           </SheetTitle>
         </SheetHeader>
 
@@ -80,15 +232,56 @@ export function JobDetail({ plistPath, open, onClose, onEdit }: JobDetailProps) 
               )}
               {job.last_run_at && (
                 <span className="text-xs text-muted-foreground">
-                  Last run: {new Date(Number(job.last_run_at)).toLocaleString()}
+                  Last run: {formatEpochMillis24(job.last_run_at)}
                 </span>
               )}
+            </div>
+
+            <div className="grid gap-2 rounded-md border bg-muted/20 p-3 sm:grid-cols-3">
+              <div>
+                <p className="text-xs text-muted-foreground">Health</p>
+                <p className="mt-1 text-sm font-medium">{healthLabel(job)}</p>
+                {job.plist.metadata.last_health_check_at && (
+                  <p className="text-xs text-muted-foreground">
+                    Last checked: {formatEpochMillis24(job.plist.metadata.last_health_check_at)}
+                  </p>
+                )}
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Log Paths</p>
+                <p className="mt-1 text-sm font-medium">
+                  {[job.plist.standard_out_path, job.plist.standard_error_path].filter(Boolean).length}/2
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Group</p>
+                <p className="mt-1 truncate text-sm font-medium">
+                  {job.plist.metadata.group ?? "Ungrouped"}
+                </p>
+                {job.plist.metadata.ports.length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    Ports: {job.plist.metadata.ports.join(", ")}
+                  </p>
+                )}
+              </div>
             </div>
 
             <div className="flex gap-2">
               {job.source === "UserAgent" && (
                 <Button size="sm" variant="outline" onClick={() => onEdit(job)}>
                   Edit
+                </Button>
+              )}
+              <Button size="sm" variant="outline" onClick={handleCheckHealth} disabled={checkingHealth}>
+                {checkingHealth ? "Checking..." : "Check Health"}
+              </Button>
+              <Button size="sm" variant="outline" onClick={handleRefreshDiagnosis} disabled={diagnosisLoading}>
+                {diagnosisLoading ? "Diagnosing..." : "Diagnose"}
+              </Button>
+              {job.source === "UserAgent" && diagnosis?.suggested_metadata && (
+                <Button size="sm" variant="secondary" onClick={handleApplySuggestedMetadata}>
+                  <Wrench className="h-3 w-3 mr-1" />
+                  Apply Suggested Fix
                 </Button>
               )}
               <Button
@@ -103,15 +296,174 @@ export function JobDetail({ plistPath, open, onClose, onEdit }: JobDetailProps) 
 
             <Separator />
 
+            <section className="space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold">{repairSectionTitle}</h3>
+                {diagnosisLoading && (
+                  <span className="text-xs text-muted-foreground">Analyzing logs and metadata...</span>
+                )}
+              </div>
+              {diagnosisError && (
+                <div className="rounded-md border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
+                  {diagnosisError}
+                </div>
+              )}
+              {diagnosis ? (
+                <div
+                  className={
+                    repairSectionTitle === "Repair"
+                      ? "space-y-3 rounded-md border bg-muted/20 p-3"
+                      : "space-y-3 rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3"
+                  }
+                >
+                  {noExplicitHealthCheck && (
+                    <div className="space-y-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
+                      <div className="flex items-start gap-2">
+                        <Badge variant="outline" className="border-amber-500/40 text-amber-700">
+                          No health check
+                        </Badge>
+                        <div className="text-sm">
+                          <p className="font-medium">No explicit health check is configured.</p>
+                          <p className="text-muted-foreground">
+                            Add a Health Check URL or command to turn this into a probe-backed status.
+                          </p>
+                        </div>
+                      </div>
+                      {showRepairButton && (
+                        <div className="flex">
+                          <Button size="sm" variant="outline" onClick={() => onRepair(job, diagnosis)}>
+                            <Wrench className="h-3 w-3 mr-1" />
+                            Repair
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {!noExplicitHealthCheck && (
+                    <div className="flex items-start gap-2">
+                      {repairSectionTitle === "Repair" ? (
+                        <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-500" />
+                      ) : (
+                        <CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-500" />
+                      )}
+                      <div>
+                        <p className="text-sm font-medium">{diagnosis.summary}</p>
+                        {diagnosis.health_status && (
+                          <p className="text-xs text-muted-foreground break-words">
+                            Health: {diagnosis.health_status}
+                            {diagnosis.health_detail ? ` · ${diagnosis.health_detail}` : ""}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {likelyCauses.length > 0 && (
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
+                        Likely causes
+                      </p>
+                      <ul className="mt-2 space-y-1 text-sm">
+                        {likelyCauses.map((cause) => (
+                          <li key={cause} className="rounded border bg-background px-2 py-1">
+                            {cause}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {suggestions.length > 0 && (
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
+                        Suggested fixes
+                      </p>
+                      <ul className="mt-2 space-y-2">
+                        {suggestions.map((suggestion) => (
+                          <li key={suggestion.title} className="rounded border bg-background px-2 py-2">
+                            <div className="text-sm font-medium">{suggestion.title}</div>
+                            <div className="text-sm text-muted-foreground">{suggestion.detail}</div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {diagnosis.stderr_excerpt && (
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
+                        stderr excerpt
+                      </p>
+                      <CopyableCodeBlock
+                        text={diagnosis.stderr_excerpt}
+                        copyLabel="Copy stderr excerpt"
+                        className="mt-2"
+                      >
+                        <pre className="max-h-40 overflow-auto rounded border bg-background p-2 text-xs whitespace-pre-wrap">
+                          {diagnosis.stderr_excerpt}
+                        </pre>
+                      </CopyableCodeBlock>
+                    </div>
+                  )}
+                  {diagnosis.stdout_excerpt && (
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
+                        stdout excerpt
+                      </p>
+                      <CopyableCodeBlock
+                        text={diagnosis.stdout_excerpt}
+                        copyLabel="Copy stdout excerpt"
+                        className="mt-2"
+                      >
+                        <pre className="max-h-40 overflow-auto rounded border bg-background p-2 text-xs whitespace-pre-wrap">
+                          {diagnosis.stdout_excerpt}
+                        </pre>
+                      </CopyableCodeBlock>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="rounded-md border bg-muted/20 p-3 text-sm text-muted-foreground">
+                  Run Diagnose to inspect logs, health, and likely repair paths.
+                </div>
+              )}
+            </section>
+
             <Tabs defaultValue="config">
               <TabsList>
                 <TabsTrigger value="config">Configuration</TabsTrigger>
                 <TabsTrigger value="logs">Logs</TabsTrigger>
               </TabsList>
 
-              <TabsContent value="config" className="space-y-1">
+            <TabsContent value="config" className="space-y-1">
                 <dl>
                   <DetailRow label="Label" value={job.plist.label} />
+                  <DetailRow label="Group" value={job.plist.metadata.group ?? "Ungrouped"} />
+                  <DetailRow label="Description" value={job.plist.metadata.description} />
+                  <DetailRow label="Environment" value={job.plist.metadata.environment} />
+                  <DetailRow label="Managed By" value={job.plist.metadata.managed_by} />
+                  <DetailRow label="Template" value={job.plist.metadata.template} />
+                  <DetailRow
+                    label="Health Check URL"
+                    value={job.plist.metadata.health_check_url}
+                  />
+                  <DetailRow
+                    label="Health Check Command"
+                    value={job.plist.metadata.health_check_command}
+                  />
+                  <DetailRow
+                    label="Ports"
+                    value={job.plist.metadata.ports.length > 0 ? job.plist.metadata.ports.join(", ") : null}
+                  />
+                  {job.plist.metadata.tags.length > 0 && (
+                    <div className="grid grid-cols-3 gap-2 py-1.5">
+                      <dt className="text-sm text-muted-foreground">Tags</dt>
+                      <dd className="col-span-2 flex flex-wrap gap-1">
+                        {job.plist.metadata.tags.map((tag) => (
+                          <Badge key={tag} variant="outline">
+                            {tag}
+                          </Badge>
+                        ))}
+                      </dd>
+                    </div>
+                  )}
                   <DetailRow label="Program" value={job.plist.program} />
                   {job.plist.program_arguments && job.plist.program_arguments.length > 0 && (
                     <div className="grid grid-cols-3 gap-2 py-1.5">
@@ -179,6 +531,14 @@ export function JobDetail({ plistPath, open, onClose, onEdit }: JobDetailProps) 
                       </div>
                     </>
                   )}
+                {healthMessage && (
+                  <>
+                    <Separator />
+                    <p className="text-sm text-muted-foreground break-words whitespace-pre-wrap">
+                      {healthMessage}
+                    </p>
+                  </>
+                )}
               </TabsContent>
 
               <TabsContent value="logs">

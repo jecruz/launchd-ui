@@ -1,4 +1,4 @@
-# launchd-ui
+# Daemonic
 
 macOS launchd エージェント/デーモン管理GUI（Tauri v2）
 

@@ -1,6 +1,9 @@
 export type JobSource = "UserAgent" | "SystemAgent" | "SystemDaemon"
 export type JobStatus = "Running" | "Loaded" | "Unloaded" | "Unknown"
 
+export type JobSortKey = "label" | "source" | "status" | "pid" | "last_run_at" | "health"
+export type SortDirection = "asc" | "desc"
+
 export type JobListEntry = {
   label: string
   pid: number | null
@@ -9,6 +12,8 @@ export type JobListEntry = {
   source: JobSource
   status: JobStatus
   last_run_at: string | null
+  metadata: LaunchControlMetadata
+  log_paths: LogPaths
 }
 
 export type CalendarInterval = {
@@ -33,7 +38,29 @@ export type PlistConfig = {
   environment_variables: Record<string, string> | null
   disabled: boolean | null
   wake_system: boolean | null
+  metadata: LaunchControlMetadata
   raw_xml: string
+}
+
+export type LaunchControlMetadata = {
+  group: string | null
+  tags: string[]
+  managed_by: string | null
+  description: string | null
+  environment: string | null
+  health_check_url: string | null
+  health_check_command: string | null
+  ports: number[]
+  template: string | null
+  migration_hint: string | null
+  health_status: string | null
+  health_detail: string | null
+  last_health_check_at: string | null
+}
+
+export type LogPaths = {
+  stdout: string | null
+  stderr: string | null
 }
 
 export type LaunchdJob = {
@@ -45,6 +72,23 @@ export type LaunchdJob = {
   last_exit_code: number | null
   plist: PlistConfig
   last_run_at: string | null
+}
+
+export type ServiceRepairSuggestion = {
+  title: string
+  detail: string
+  kind: string
+}
+
+export type ServiceDiagnosis = {
+  summary: string
+  likely_causes: string[]
+  suggestions: ServiceRepairSuggestion[]
+  stderr_excerpt: string | null
+  stdout_excerpt: string | null
+  health_status: string | null
+  health_detail: string | null
+  suggested_metadata: LaunchControlMetadata | null
 }
 
 export type AgentRuntimeProvider = "LlamaCpp" | "Ollama" | "LocalCli"
@@ -108,8 +152,51 @@ export type ApprovedAgentActionResult = {
   verified_last_exit_code: number | null
 }
 
+export type ServiceHealthCheckResult = {
+  status: string
+  detail: string
+  checked_at: string
+}
+
 export type AgentPromptRequest = {
   prompt: string
   job_context: string | null
   mode: string
+}
+
+export type AppPreferences = {
+  search: string
+  source_filter: JobSource | "All"
+  group_filter: string
+  sort_key: JobSortKey
+  sort_direction: SortDirection
+  agent_mode: "copilot" | "approval" | "assistant"
+  detail_open: boolean
+  form_open: boolean
+  selected_plist_path: string | null
+  job_form_draft: JobFormDraft | null
+  window_geometry: WindowGeometry | null
+}
+
+export type JobFormScheduleType = "none" | "interval" | "calendar"
+export type JobFormHourMode = "specific" | "every" | "range"
+
+export type JobFormDraft = {
+  editing_plist_path: string | null
+  config: PlistConfig
+  args: string
+  schedule_type: JobFormScheduleType
+  hour_mode: JobFormHourMode
+  calendar_interval: CalendarInterval | null
+  hour_range: {
+    from: number
+    to: number
+  }
+}
+
+export type WindowGeometry = {
+  x: number
+  y: number
+  width: number
+  height: number
 }

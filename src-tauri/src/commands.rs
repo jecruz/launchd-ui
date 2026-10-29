@@ -2,10 +2,81 @@ use crate::agent_runtime;
 use crate::error::AppError;
 use crate::launchctl;
 use crate::plist_util;
+use crate::service_overlays;
 use crate::types::PlistConfig;
-use crate::types::{JobListEntry, JobStatus, LaunchdJob};
+use crate::types::{
+    JobListEntry, JobStatus, LaunchControlMetadata, LaunchdJob, LogPaths, ServiceDiagnosis,
+    ServiceRepairSuggestion,
+};
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::Command;
+
+fn current_epoch_millis() -> String {
+    let now = std::time::SystemTime::now();
+    let millis = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    millis.to_string()
+}
+
+fn tail_file(path: &str, limit: usize) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(limit);
+    let excerpt = lines[start..].join("\n");
+    if excerpt.trim().is_empty() {
+        None
+    } else {
+        Some(excerpt)
+    }
+}
+
+fn line_has_log_timestamp(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() < 10 {
+        return false;
+    }
+
+    bytes[0..4].iter().all(|byte| byte.is_ascii_digit())
+        && bytes[4] == b'-'
+        && bytes[5..7].iter().all(|byte| byte.is_ascii_digit())
+        && bytes[7] == b'-'
+        && bytes[8..10].iter().all(|byte| byte.is_ascii_digit())
+}
+
+fn excerpt_has_log_timestamp(excerpt: Option<&str>) -> bool {
+    excerpt
+        .map(|text| text.lines().any(line_has_log_timestamp))
+        .unwrap_or(false)
+}
+
+fn parse_program_port(program_arguments: Option<&Vec<String>>) -> Option<u16> {
+    let args = program_arguments?;
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if let Some(value) = arg.strip_prefix("--port=") {
+            if let Ok(port) = value.parse::<u16>() {
+                return Some(port);
+            }
+        }
+        if arg == "--port" {
+            if let Some(next) = iter.peek() {
+                if let Ok(port) = next.parse::<u16>() {
+                    return Some(port);
+                }
+            }
+        }
+        if let Some(value) = arg.strip_prefix("port=") {
+            if let Ok(port) = value.parse::<u16>() {
+                return Some(port);
+            }
+        }
+    }
+    None
+}
 
 fn get_last_run_at(config: &PlistConfig) -> Option<String> {
     let paths = [&config.standard_out_path, &config.standard_error_path];
@@ -150,6 +221,7 @@ fn approved_action_command(
 pub async fn list_jobs() -> Result<Vec<JobListEntry>, AppError> {
     let plist_files = plist_util::scan_plist_files();
     let loaded = launchctl::list_loaded().unwrap_or_default();
+    let overlays = service_overlays::load_service_overrides().unwrap_or_default();
 
     let loaded_map: HashMap<String, &launchctl::LoadedService> =
         loaded.iter().map(|s| (s.label.clone(), s)).collect();
@@ -172,6 +244,7 @@ pub async fn list_jobs() -> Result<Vec<JobListEntry>, AppError> {
             (JobStatus::Unloaded, None, None)
         };
 
+        let metadata = service_overlays::merge_metadata(&config.metadata, overlays.get(&path));
         let last_run_at = get_last_run_at(&config);
         entries.push(JobListEntry {
             label: config.label,
@@ -181,6 +254,11 @@ pub async fn list_jobs() -> Result<Vec<JobListEntry>, AppError> {
             source,
             status,
             last_run_at,
+            metadata,
+            log_paths: LogPaths {
+                stdout: config.standard_out_path.clone(),
+                stderr: config.standard_error_path.clone(),
+            },
         });
     }
 
@@ -195,6 +273,7 @@ pub async fn get_job_detail(plist_path: String) -> Result<LaunchdJob, AppError> 
     }
 
     let plist = plist_util::parse_plist(&plist_path)?;
+    let metadata = service_overlays::merge_metadata_by_path(&plist_path, &plist.metadata)?;
     let loaded = launchctl::list_loaded().unwrap_or_default();
 
     let svc = loaded.iter().find(|s| s.label == plist.label);
@@ -226,9 +305,400 @@ pub async fn get_job_detail(plist_path: String) -> Result<LaunchdJob, AppError> 
         status,
         pid,
         last_exit_code: exit_code,
-        plist,
+        plist: PlistConfig { metadata, ..plist },
         last_run_at,
     })
+}
+
+fn probe_url(url: &str) -> Result<(bool, String), AppError> {
+    let output = Command::new("curl")
+        .args(["-fsS", "--max-time", "5", url])
+        .output()
+        .map_err(|e| AppError::AgentRuntime(format!("failed to run curl: {e}")))?;
+    if output.status.success() {
+        let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((
+            true,
+            if response.is_empty() {
+                format!("GET {url} succeeded")
+            } else {
+                format!("GET {url} succeeded: {response}")
+            },
+        ));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Ok((
+        false,
+        if stderr.is_empty() {
+            format!("GET {url} failed with status {}", output.status)
+        } else {
+            format!("GET {url} failed: {stderr}")
+        },
+    ))
+}
+
+fn candidate_health_urls(
+    label: &str,
+    plist: &PlistConfig,
+    metadata: &crate::types::LaunchControlMetadata,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let derived_port = parse_program_port(plist.program_arguments.as_ref());
+    if let Some(port) = derived_port {
+        candidates.push(format!("http://127.0.0.1:{port}/health"));
+        candidates.push(format!("http://127.0.0.1:{port}/status"));
+        candidates.push(format!("http://127.0.0.1:{port}/"));
+    }
+
+    for port in &metadata.ports {
+        if Some(*port) == derived_port {
+            continue;
+        }
+        candidates.push(format!("http://127.0.0.1:{port}/health"));
+        candidates.push(format!("http://127.0.0.1:{port}/status"));
+        candidates.push(format!("http://127.0.0.1:{port}/"));
+    }
+
+    let label_lower = label.to_lowercase();
+    if candidates.is_empty() && label_lower.contains("uptime-kuma") {
+        candidates.push("http://127.0.0.1:3001/".to_string());
+        candidates.push("http://127.0.0.1:3001/status".to_string());
+    }
+
+    candidates
+}
+
+fn run_health_check_command(
+    label: &str,
+    plist: &PlistConfig,
+    metadata: &crate::types::LaunchControlMetadata,
+) -> Result<(String, String), AppError> {
+    if let Some(url) = metadata.health_check_url.as_ref() {
+        let (healthy, detail) = probe_url(url)?;
+        if healthy {
+            return Ok(("healthy".to_string(), detail));
+        }
+
+        if let Some(port) = parse_program_port(plist.program_arguments.as_ref()) {
+            if !url.contains(&port.to_string()) {
+                let fallback_urls = [
+                    format!("http://127.0.0.1:{port}/health"),
+                    format!("http://127.0.0.1:{port}/status"),
+                    format!("http://127.0.0.1:{port}/"),
+                ];
+                for fallback in fallback_urls {
+                    let (fallback_healthy, fallback_detail) = probe_url(&fallback)?;
+                    if fallback_healthy {
+                        return Ok((
+                            "healthy".to_string(),
+                            format!("{detail}; fallback {fallback} succeeded: {fallback_detail}"),
+                        ));
+                    }
+                }
+            }
+        }
+
+        return Ok(("unhealthy".to_string(), detail));
+    }
+
+    if let Some(command) = metadata.health_check_command.as_ref() {
+        let output = Command::new("sh")
+            .arg("-lc")
+            .arg(command)
+            .output()
+            .map_err(|e| AppError::AgentRuntime(format!("failed to run health command: {e}")))?;
+        if output.status.success() {
+            let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            return Ok((
+                "healthy".to_string(),
+                if response.is_empty() {
+                    format!("health command succeeded: {command}")
+                } else {
+                    format!("health command succeeded: {response}")
+                },
+            ));
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Ok((
+            "unhealthy".to_string(),
+            if stderr.is_empty() {
+                format!("health command failed with status {}", output.status)
+            } else {
+                format!("health command failed: {stderr}")
+            },
+        ));
+    }
+
+    for url in candidate_health_urls(label, plist, metadata) {
+        let (healthy, detail) = probe_url(&url)?;
+        if healthy {
+            return Ok(("healthy".to_string(), detail));
+        }
+    }
+
+    let mut detail = String::from("No explicit health check configured");
+    if !metadata.ports.is_empty() {
+        let ports = metadata
+            .ports
+            .iter()
+            .map(|port| port.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        detail.push_str(&format!("; ports available: {ports}"));
+    }
+    if label.to_lowercase().contains("uptime-kuma") {
+        if let Some(port) = parse_program_port(plist.program_arguments.as_ref()) {
+            detail.push_str(&format!("; tried declared port {port}"));
+        } else {
+            detail.push_str("; tried uptime-kuma defaults on port 3001");
+        }
+    }
+
+    Ok(("unknown".to_string(), detail))
+}
+
+fn suggest_repair(
+    job: &LaunchdJob,
+    stderr_excerpt: Option<&str>,
+    stdout_excerpt: Option<&str>,
+) -> ServiceDiagnosis {
+    let mut likely_causes = Vec::new();
+    let mut suggestions = Vec::new();
+    let stderr_lower = stderr_excerpt.unwrap_or("").to_lowercase();
+    let stdout_lower = stdout_excerpt.unwrap_or("").to_lowercase();
+    let label_lower = job.label.to_lowercase();
+    let metadata = &job.plist.metadata;
+    let log_excerpt_has_timestamps =
+        excerpt_has_log_timestamp(stderr_excerpt) || excerpt_has_log_timestamp(stdout_excerpt);
+    let stdout_has_gateway_markers = stdout_lower.contains("gateway running")
+        && (stdout_lower.contains("connected to telegram")
+            || stdout_lower.contains("telegram connected"));
+
+    if label_lower.contains("hermes.gateway") && stdout_has_gateway_markers {
+        let detail = stdout_excerpt
+            .map(|text| {
+                let compact = text
+                    .lines()
+                    .filter(|line| {
+                        let line_lower = line.to_lowercase();
+                        line_lower.contains("gateway running")
+                            || line_lower.contains("api server listening")
+                            || line_lower.contains("connected to telegram")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                if compact.is_empty() {
+                    "Hermes Gateway is running normally.".to_string()
+                } else {
+                    format!("Hermes Gateway is running normally; {compact}")
+                }
+            })
+            .unwrap_or_else(|| "Hermes Gateway is running normally.".to_string());
+
+        return ServiceDiagnosis {
+            summary: "Hermes Gateway is running normally; recent warnings appear non-fatal."
+                .to_string(),
+            likely_causes: Vec::new(),
+            suggestions: Vec::new(),
+            stderr_excerpt: stderr_excerpt.map(ToOwned::to_owned),
+            stdout_excerpt: stdout_excerpt.map(ToOwned::to_owned),
+            health_status: Some("healthy".to_string()),
+            health_detail: Some(detail),
+            suggested_metadata: None,
+        };
+    }
+
+    if job.last_exit_code.is_some() && job.last_exit_code != Some(0) {
+        likely_causes.push(format!("The last exit code was {:?}", job.last_exit_code));
+    }
+    if stderr_lower.contains("connection refused") || stdout_lower.contains("connection refused") {
+        likely_causes
+            .push("The service is running but not reachable on the expected port.".to_string());
+    }
+    if stderr_lower.contains("no such file") || stderr_lower.contains("not found") {
+        likely_causes.push("A command, working directory, or path is missing.".to_string());
+    }
+    if stderr_lower.contains("permission denied") {
+        likely_causes
+            .push("The process lacks permission to open a file or bind a resource.".to_string());
+    }
+    if stderr_lower.contains("address already in use")
+        || stdout_lower.contains("address already in use")
+    {
+        likely_causes.push("The configured port is already occupied.".to_string());
+    }
+    if label_lower.contains("uptime-kuma") {
+        let declared_port =
+            parse_program_port(job.plist.program_arguments.as_ref()).unwrap_or(3001);
+        likely_causes.push(format!(
+            "Uptime Kuma usually serves HTTP on port {declared_port}."
+        ));
+        if metadata.health_check_url.is_none()
+            || metadata
+                .health_check_url
+                .as_deref()
+                .map(|value| !value.contains(&declared_port.to_string()))
+                .unwrap_or(true)
+        {
+            suggestions.push(ServiceRepairSuggestion {
+                title: "Set a health URL".to_string(),
+                detail: format!(
+                    "Add `http://127.0.0.1:{declared_port}/` as the health check URL so Daemonic can verify the service."
+                ),
+                kind: "metadata".to_string(),
+            });
+        }
+        if !metadata.ports.contains(&declared_port) {
+            suggestions.push(ServiceRepairSuggestion {
+                title: format!("Declare port {declared_port}"),
+                detail: format!(
+                    "Add {declared_port} to the service ports so the dashboard can surface the listener and health probes."
+                ),
+                kind: "metadata".to_string(),
+            });
+        }
+        if metadata.template.is_none() {
+            suggestions.push(ServiceRepairSuggestion {
+                title: "Use the web template".to_string(),
+                detail: "Mark the service as a web service so the metadata stays consistent across repairs.".to_string(),
+                kind: "template".to_string(),
+            });
+        }
+    }
+    if job.plist.working_directory.is_none() && job.plist.program_arguments.is_some() {
+        suggestions.push(ServiceRepairSuggestion {
+            title: "Set a working directory".to_string(),
+            detail: "Some services fail when launchd starts them outside their expected project directory.".to_string(),
+            kind: "plist".to_string(),
+        });
+    }
+    if job.plist.standard_error_path.is_none() {
+        suggestions.push(ServiceRepairSuggestion {
+            title: "Write stderr to a file".to_string(),
+            detail:
+                "Configure a stderr log path so Daemonic can surface the failure details directly."
+                    .to_string(),
+            kind: "plist".to_string(),
+        });
+    }
+
+    if stderr_excerpt.is_some()
+        && !log_excerpt_has_timestamps
+        && metadata.health_status.as_deref() != Some("healthy")
+    {
+        let summary = if label_lower.contains("hermes.gateway") {
+            "Hermes Gateway log output has no timestamps, so the warning may be stale.".to_string()
+        } else {
+            "The log excerpt has no timestamps, so the warning may be stale and the service may already be healthy."
+                .to_string()
+        };
+
+        return ServiceDiagnosis {
+            summary,
+            likely_causes: Vec::new(),
+            suggestions: Vec::new(),
+            stderr_excerpt: stderr_excerpt.map(ToOwned::to_owned),
+            stdout_excerpt: stdout_excerpt.map(ToOwned::to_owned),
+            health_status: Some("unknown".to_string()),
+            health_detail: Some(
+                "Log excerpt has no timestamps; treat the warning as stale until a fresh probe or timestamped log confirms it."
+                    .to_string(),
+            ),
+            suggested_metadata: None,
+        };
+    }
+
+    let summary = if metadata.health_status.as_deref() == Some("healthy") {
+        if let Some(detail) = metadata.health_detail.as_ref() {
+            format!("The service is healthy. {detail}")
+        } else {
+            "The service is healthy.".to_string()
+        }
+    } else if let Some(stderr) = stderr_excerpt {
+        if stderr_lower.contains("connection refused") {
+            "The service is failing a health check or cannot be reached on its expected port."
+                .to_string()
+        } else if stderr_lower.contains("not found") || stderr_lower.contains("no such file") {
+            "The service appears to be failing because a path or command is missing.".to_string()
+        } else if stderr_lower.contains("permission denied") {
+            "The service appears to be failing due to a permissions problem.".to_string()
+        } else if label_lower.contains("uptime-kuma") {
+            "Uptime Kuma is likely failing because its health/port metadata is incomplete."
+                .to_string()
+        } else {
+            format!("The service is unhealthy. Recent stderr suggests: {stderr}")
+        }
+    } else if label_lower.contains("uptime-kuma") {
+        let declared_port =
+            parse_program_port(job.plist.program_arguments.as_ref()).unwrap_or(3001);
+        format!("Uptime Kuma likely needs port {declared_port} and an explicit health URL.")
+    } else if metadata.health_status.as_deref() == Some("unknown")
+        || metadata.health_status.is_none()
+    {
+        if label_lower.contains("hermes.gateway") {
+            "Hermes Gateway is running but has no explicit health check configured yet.".to_string()
+        } else {
+            "The service health is unknown; no explicit health check is configured yet.".to_string()
+        }
+    } else {
+        "The service is unhealthy, but no stderr excerpt is available yet.".to_string()
+    };
+
+    let suggested_metadata = if label_lower.contains("uptime-kuma") {
+        let declared_port =
+            parse_program_port(job.plist.program_arguments.as_ref()).unwrap_or(3001);
+        Some(LaunchControlMetadata {
+            group: metadata
+                .group
+                .clone()
+                .or_else(|| Some("CAISS System".to_string())),
+            tags: if metadata.tags.is_empty() {
+                vec!["uptime-kuma".to_string(), "monitoring".to_string()]
+            } else {
+                metadata.tags.clone()
+            },
+            managed_by: metadata
+                .managed_by
+                .clone()
+                .or_else(|| Some("Daemonic".to_string())),
+            description: metadata
+                .description
+                .clone()
+                .or_else(|| Some("Uptime Kuma service".to_string())),
+            environment: metadata
+                .environment
+                .clone()
+                .or_else(|| Some("local".to_string())),
+            health_check_url: Some(format!("http://127.0.0.1:{declared_port}/")),
+            health_check_command: metadata.health_check_command.clone(),
+            ports: vec![declared_port],
+            template: metadata
+                .template
+                .clone()
+                .or_else(|| Some("web".to_string())),
+            migration_hint: metadata
+                .migration_hint
+                .clone()
+                .or_else(|| Some("docker-compose".to_string())),
+            health_status: metadata.health_status.clone(),
+            health_detail: metadata.health_detail.clone(),
+            last_health_check_at: metadata.last_health_check_at.clone(),
+        })
+    } else {
+        None
+    };
+
+    ServiceDiagnosis {
+        summary,
+        likely_causes,
+        suggestions,
+        stderr_excerpt: stderr_excerpt.map(ToOwned::to_owned),
+        stdout_excerpt: stdout_excerpt.map(ToOwned::to_owned),
+        health_status: metadata.health_status.clone(),
+        health_detail: metadata.health_detail.clone(),
+        suggested_metadata,
+    }
 }
 
 #[tauri::command]
@@ -278,7 +748,9 @@ pub async fn disable_job(label: String, plist_path: String) -> Result<(), AppErr
 
 #[tauri::command]
 pub async fn save_job(plist_path: String, config: PlistConfig) -> Result<(), AppError> {
-    plist_util::write_plist(&plist_path, &config)
+    ensure_user_agent(&plist_path)?;
+    plist_util::write_plist(&plist_path, &config)?;
+    service_overlays::upsert_service_override(&plist_path, &config.metadata)
 }
 
 #[tauri::command]
@@ -304,6 +776,7 @@ pub async fn create_job(label: String, config: PlistConfig) -> Result<String, Ap
         .ok_or_else(|| AppError::Plist("invalid path".to_string()))?
         .to_string();
     plist_util::write_plist(&path_str, &config)?;
+    service_overlays::upsert_service_override(&path_str, &config.metadata)?;
     Ok(path_str)
 }
 
@@ -319,7 +792,57 @@ pub async fn delete_job(plist_path: String, label: String) -> Result<(), AppErro
     if std::path::Path::new(&plist_path).exists() {
         std::fs::remove_file(&plist_path)?;
     }
+    let _ = service_overlays::remove_service_override(&plist_path);
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+pub struct HealthCheckResult {
+    status: String,
+    detail: String,
+    checked_at: String,
+}
+
+#[tauri::command]
+pub async fn check_service_health(plist_path: String) -> Result<HealthCheckResult, AppError> {
+    let job = get_job_detail(plist_path.clone()).await?;
+    let (status, detail) = run_health_check_command(&job.label, &job.plist, &job.plist.metadata)?;
+    let checked_at = current_epoch_millis();
+    let mut updated_metadata = job.plist.metadata.clone();
+    updated_metadata.health_status = Some(status.clone());
+    updated_metadata.health_detail = Some(detail.clone());
+    updated_metadata.last_health_check_at = Some(checked_at.clone());
+    service_overlays::upsert_service_override(&plist_path, &updated_metadata)?;
+    Ok(HealthCheckResult {
+        status,
+        detail,
+        checked_at,
+    })
+}
+
+#[tauri::command]
+pub async fn diagnose_service(plist_path: String) -> Result<ServiceDiagnosis, AppError> {
+    let job = get_job_detail(plist_path.clone()).await?;
+    let stderr_excerpt = job
+        .plist
+        .standard_error_path
+        .as_ref()
+        .and_then(|path| tail_file(path, 40));
+    let stdout_excerpt = job
+        .plist
+        .standard_out_path
+        .as_ref()
+        .and_then(|path| tail_file(path, 20));
+    let mut diagnosis = suggest_repair(&job, stderr_excerpt.as_deref(), stdout_excerpt.as_deref());
+
+    if diagnosis.health_status.is_none() {
+        diagnosis.health_status = job.plist.metadata.health_status.clone();
+    }
+    if diagnosis.health_detail.is_none() {
+        diagnosis.health_detail = job.plist.metadata.health_detail.clone();
+    }
+
+    Ok(diagnosis)
 }
 
 #[derive(serde::Serialize)]
@@ -418,6 +941,19 @@ pub async fn save_agent_runtime_settings(
 }
 
 #[tauri::command]
+pub async fn get_app_preferences() -> Result<agent_runtime::AppPreferences, AppError> {
+    agent_runtime::load_app_preferences()
+}
+
+#[tauri::command]
+pub async fn save_app_preferences(
+    preferences: agent_runtime::AppPreferences,
+) -> Result<agent_runtime::AppPreferences, AppError> {
+    agent_runtime::save_app_preferences(&preferences)?;
+    Ok(preferences)
+}
+
+#[tauri::command]
 pub async fn run_agent_prompt(
     request: agent_runtime::AgentPromptRequest,
 ) -> Result<agent_runtime::AgentRuntimeResult, AppError> {
@@ -482,6 +1018,7 @@ pub async fn apply_approved_agent_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::JobSource;
 
     #[test]
     fn ensure_user_agent_accepts_home_launch_agents() {
@@ -575,5 +1112,324 @@ mod tests {
         assert!(command.starts_with("launchctl bootstrap gui/"));
         assert!(command.ends_with(plist_path));
         assert!(!command.contains("<uid>"));
+    }
+
+    #[test]
+    fn candidate_health_urls_prefers_program_port_before_metadata_port() {
+        let plist = PlistConfig {
+            label: "ai.cybergrunt.uptime-kuma".to_string(),
+            program: None,
+            program_arguments: Some(vec![
+                "/opt/homebrew/bin/node".to_string(),
+                "/opt/homebrew/lib/node_modules/uptime-kuma/server/server.js".to_string(),
+                "--port=3002".to_string(),
+            ]),
+            run_at_load: None,
+            keep_alive: None,
+            start_interval: None,
+            start_calendar_interval: None,
+            standard_out_path: None,
+            standard_error_path: None,
+            working_directory: None,
+            environment_variables: None,
+            disabled: None,
+            wake_system: None,
+            metadata: LaunchControlMetadata {
+                ports: vec![3001],
+                ..LaunchControlMetadata::default()
+            },
+            raw_xml: String::new(),
+        };
+        let metadata = plist.metadata.clone();
+
+        let urls = candidate_health_urls(&plist.label, &plist, &metadata);
+
+        assert_eq!(
+            urls.first().map(String::as_str),
+            Some("http://127.0.0.1:3002/health")
+        );
+        assert!(urls.iter().any(|url| url == "http://127.0.0.1:3001/health"));
+    }
+
+    #[test]
+    fn suggest_repair_uses_declared_program_port_for_uptime_kuma() {
+        let job = LaunchdJob {
+            label: "ai.cybergrunt.uptime-kuma".to_string(),
+            plist_path: "/Users/jeffreycruz/Library/LaunchAgents/ai.cybergrunt.uptime-kuma.plist"
+                .to_string(),
+            source: JobSource::UserAgent,
+            status: JobStatus::Running,
+            pid: Some(1234),
+            last_exit_code: Some(1),
+            plist: PlistConfig {
+                label: "ai.cybergrunt.uptime-kuma".to_string(),
+                program: None,
+                program_arguments: Some(vec![
+                    "/opt/homebrew/bin/node".to_string(),
+                    "/opt/homebrew/lib/node_modules/uptime-kuma/server/server.js".to_string(),
+                    "--port=3002".to_string(),
+                ]),
+                run_at_load: None,
+                keep_alive: None,
+                start_interval: None,
+                start_calendar_interval: None,
+                standard_out_path: None,
+                standard_error_path: None,
+                working_directory: None,
+                environment_variables: None,
+                disabled: None,
+                wake_system: None,
+                metadata: LaunchControlMetadata::default(),
+                raw_xml: String::new(),
+            },
+            last_run_at: None,
+        };
+
+        let diagnosis = suggest_repair(&job, None, None);
+
+        let suggested = diagnosis.suggested_metadata.expect("suggested metadata");
+        assert_eq!(
+            suggested.health_check_url.as_deref(),
+            Some("http://127.0.0.1:3002/")
+        );
+        assert_eq!(suggested.ports, vec![3002]);
+        assert!(
+            diagnosis
+                .likely_causes
+                .iter()
+                .any(|cause| cause.contains("3002"))
+        );
+    }
+
+    #[test]
+    fn suggest_repair_reports_healthy_when_health_check_succeeds() {
+        let job = LaunchdJob {
+            label: "ai.cybergrunt.uptime-kuma".to_string(),
+            plist_path: "/Users/jeffreycruz/Library/LaunchAgents/ai.cybergrunt.uptime-kuma.plist"
+                .to_string(),
+            source: JobSource::UserAgent,
+            status: JobStatus::Running,
+            pid: Some(1234),
+            last_exit_code: Some(0),
+            plist: PlistConfig {
+                label: "ai.cybergrunt.uptime-kuma".to_string(),
+                program: None,
+                program_arguments: Some(vec![
+                    "/opt/homebrew/bin/node".to_string(),
+                    "/opt/homebrew/lib/node_modules/uptime-kuma/server/server.js".to_string(),
+                    "--port=3002".to_string(),
+                ]),
+                run_at_load: None,
+                keep_alive: None,
+                start_interval: None,
+                start_calendar_interval: None,
+                standard_out_path: None,
+                standard_error_path: None,
+                working_directory: None,
+                environment_variables: None,
+                disabled: None,
+                wake_system: None,
+                metadata: LaunchControlMetadata {
+                    health_status: Some("healthy".to_string()),
+                    health_detail: Some(
+                        "GET http://127.0.0.1:3002/ succeeded: Found. Redirecting to /dashboard"
+                            .to_string(),
+                    ),
+                    ..LaunchControlMetadata::default()
+                },
+                raw_xml: String::new(),
+            },
+            last_run_at: None,
+        };
+
+        let diagnosis = suggest_repair(&job, None, None);
+
+        assert!(
+            diagnosis.summary.starts_with("The service is healthy."),
+            "unexpected summary: {}",
+            diagnosis.summary
+        );
+        assert!(
+            !diagnosis.summary.contains("likely failing"),
+            "unexpected summary: {}",
+            diagnosis.summary
+        );
+    }
+
+    #[test]
+    fn suggest_repair_reports_unknown_when_no_explicit_health_check_exists() {
+        let job = LaunchdJob {
+            label: "com.jeffreycruz.agent-continuity-hooks".to_string(),
+            plist_path:
+                "/Users/jeffreycruz/Library/LaunchAgents/com.jeffreycruz.agent-continuity-hooks.plist"
+                    .to_string(),
+            source: JobSource::UserAgent,
+            status: JobStatus::Running,
+            pid: Some(1967),
+            last_exit_code: Some(0),
+            plist: PlistConfig {
+                label: "com.jeffreycruz.agent-continuity-hooks".to_string(),
+                program: None,
+                program_arguments: Some(vec![
+                    "/bin/bash".to_string(),
+                    "/Users/jeffreycruz/Development/AI_TOOLS/agent-continuity-hooks/scripts/watch-context.sh".to_string(),
+                ]),
+                run_at_load: Some(true),
+                keep_alive: Some(true),
+                start_interval: None,
+                start_calendar_interval: None,
+                standard_out_path: None,
+                standard_error_path: None,
+                working_directory: Some(
+                    "/Users/jeffreycruz/Development/AI_TOOLS/agent-continuity-hooks".to_string(),
+                ),
+                environment_variables: None,
+                disabled: None,
+                wake_system: None,
+                metadata: LaunchControlMetadata::default(),
+                raw_xml: String::new(),
+            },
+            last_run_at: None,
+        };
+
+        let diagnosis = suggest_repair(&job, None, None);
+
+        assert!(
+            diagnosis.summary.contains("unknown"),
+            "unexpected summary: {}",
+            diagnosis.summary
+        );
+        assert!(
+            !diagnosis.summary.contains("unhealthy"),
+            "unexpected summary: {}",
+            diagnosis.summary
+        );
+    }
+
+    #[test]
+    fn suggest_repair_treats_hermes_gateway_as_healthy_when_startup_markers_are_present() {
+        let job = LaunchdJob {
+            label: "ai.hermes.gateway".to_string(),
+            plist_path: "/Users/jeffreycruz/Library/LaunchAgents/ai.hermes.gateway.plist"
+                .to_string(),
+            source: JobSource::UserAgent,
+            status: JobStatus::Running,
+            pid: Some(77462),
+            last_exit_code: Some(1),
+            plist: PlistConfig {
+                label: "ai.hermes.gateway".to_string(),
+                program: Some(
+                    "/Users/jeffreycruz/.hermes/bin/hermes-gateway-keychain-wrapper.zsh"
+                        .to_string(),
+                ),
+                program_arguments: Some(vec![
+                    "/Users/jeffreycruz/.hermes/bin/hermes-gateway-keychain-wrapper.zsh"
+                        .to_string(),
+                ]),
+                run_at_load: Some(true),
+                keep_alive: Some(true),
+                start_interval: None,
+                start_calendar_interval: None,
+                standard_out_path: Some("/Users/jeffreycruz/.hermes/logs/gateway.log".to_string()),
+                standard_error_path: Some(
+                    "/Users/jeffreycruz/.hermes/logs/gateway.error.log".to_string(),
+                ),
+                working_directory: Some("/Users/jeffreycruz/.hermes".to_string()),
+                environment_variables: None,
+                disabled: None,
+                wake_system: None,
+                metadata: LaunchControlMetadata::default(),
+                raw_xml: String::new(),
+            },
+            last_run_at: None,
+        };
+
+        let stdout_excerpt = r#"
+2026-06-13 20:55:41,115 INFO gateway.run: ✓ telegram connected
+2026-06-13 20:55:41,304 INFO gateway.run: ✓ api_server connected
+2026-06-13 20:55:41,312 INFO gateway.run: Gateway running with 2 platform(s)
+"#;
+        let stderr_excerpt = r#"
+telegram.error.BadRequest: Chat not found
+WARNING tools.mcp_tool: MCP server 'redmine' failed initial connection after 3 attempts, giving up
+"#;
+
+        let diagnosis = suggest_repair(&job, Some(stderr_excerpt), Some(stdout_excerpt));
+
+        assert_eq!(diagnosis.health_status.as_deref(), Some("healthy"));
+        assert!(
+            diagnosis
+                .summary
+                .starts_with("Hermes Gateway is running normally"),
+            "unexpected summary: {}",
+            diagnosis.summary
+        );
+        assert!(diagnosis.likely_causes.is_empty());
+        assert!(diagnosis.suggestions.is_empty());
+        assert!(
+            diagnosis
+                .health_detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Gateway running")
+        );
+    }
+
+    #[test]
+    fn suggest_repair_downgrades_timestampless_stderr_to_stale_unknown() {
+        let job = LaunchdJob {
+            label: "ai.example.service".to_string(),
+            plist_path: "/Users/jeffreycruz/Library/LaunchAgents/ai.example.service.plist"
+                .to_string(),
+            source: JobSource::UserAgent,
+            status: JobStatus::Running,
+            pid: Some(9021),
+            last_exit_code: Some(1),
+            plist: PlistConfig {
+                label: "ai.example.service".to_string(),
+                program: None,
+                program_arguments: Some(vec![
+                    "/bin/bash".to_string(),
+                    "/tmp/service.sh".to_string(),
+                ]),
+                run_at_load: Some(true),
+                keep_alive: Some(true),
+                start_interval: None,
+                start_calendar_interval: None,
+                standard_out_path: Some("/tmp/service.out.log".to_string()),
+                standard_error_path: Some("/tmp/service.err.log".to_string()),
+                working_directory: Some("/tmp".to_string()),
+                environment_variables: None,
+                disabled: None,
+                wake_system: None,
+                metadata: LaunchControlMetadata::default(),
+                raw_xml: String::new(),
+            },
+            last_run_at: None,
+        };
+
+        let stderr_excerpt = r#"Traceback (most recent call last):
+  File "/tmp/service.sh", line 1, in <module>
+    raise RuntimeError("boom")
+RuntimeError: boom
+"#;
+
+        let diagnosis = suggest_repair(&job, Some(stderr_excerpt), None);
+
+        assert_eq!(diagnosis.health_status.as_deref(), Some("unknown"));
+        assert!(
+            diagnosis.summary.contains("stale"),
+            "unexpected summary: {}",
+            diagnosis.summary
+        );
+        assert!(diagnosis.likely_causes.is_empty());
+        assert!(diagnosis.suggestions.is_empty());
+        assert!(
+            diagnosis
+                .health_detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no timestamps")
+        );
     }
 }

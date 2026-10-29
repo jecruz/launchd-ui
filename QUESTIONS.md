@@ -1,8 +1,8 @@
-# FUBAR Questions: launchd-ui
+# FUBAR Questions: Daemonic
 
 ## Task
 
-Run the FUBAR workflow for `launchd-ui`, focused on stabilizing the current agent-driven macOS menu bar launchd control surface.
+Run the FUBAR workflow for `Daemonic`, focused on stabilizing the current agent-driven macOS menu bar launchd control surface.
 
 ## User
 
@@ -11,7 +11,7 @@ Run the FUBAR workflow for `launchd-ui`, focused on stabilizing the current agen
 
 ## Done Means
 
-- The current tray-first `Launch Control` app has a documented implementation roadmap.
+- The current tray-first `Daemonic` app has a documented implementation roadmap.
 - Agent-assisted behavior is bounded by deterministic backend execution and explicit approval gates.
 - User-agent mutations remain allowed only for `~/Library/LaunchAgents`.
 - System agents and daemons remain read-only.
@@ -21,7 +21,7 @@ Run the FUBAR workflow for `launchd-ui`, focused on stabilizing the current agen
 ## Hard Constraints
 
 - Preserve the existing Tauri v2 + React + TypeScript + Rust architecture.
-- Keep modifications scoped to `launchd-ui`.
+- Keep modifications scoped to `Daemonic`.
 - Follow existing repo conventions in `CLAUDE.md`.
 - Use `RUSTUP_HOME=$HOME/.rustup` for cargo commands in this environment.
 - Use `pnpm`, not npm or yarn.
@@ -48,5 +48,5 @@ Run the FUBAR workflow for `launchd-ui`, focused on stabilizing the current agen
 
 ## Issue References
 
-- Redmine project memory from the session indicates `Launch Control` project id `56`.
+- Redmine project memory from the session indicates `Daemonic` project id `56`.
 - Existing related Redmine issue ids: `422`, `423`, `424`, `425`, `426`.

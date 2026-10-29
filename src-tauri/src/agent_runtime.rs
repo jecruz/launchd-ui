@@ -4,8 +4,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-const APP_DIR_NAME: &str = "launchd-ui";
+const APP_DIR_NAME: &str = "Daemonic";
+const LEGACY_APP_DIR_NAME: &str = "launchd-ui";
 const SETTINGS_FILE_NAME: &str = "agent-runtime.json";
+const APP_PREFERENCES_FILE_NAME: &str = "app-preferences.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AgentRuntimeProvider {
@@ -52,7 +54,7 @@ impl Default for AgentRuntimeSettings {
     fn default() -> Self {
         Self {
             provider: AgentRuntimeProvider::Ollama,
-            system_prompt: "You are Launch Control, a macOS launchd expert. Be concise, evidence-based, and do not claim to have executed changes. If an action is needed, propose a safe step and clearly state when approval is required.".to_string(),
+            system_prompt: "You are Daemonic, a macOS launchd expert. Be concise, evidence-based, and do not claim to have executed changes. If an action is needed, propose a safe step and clearly state when approval is required.".to_string(),
             llama_cpp_executable_path: String::new(),
             llama_cpp_model_path: String::new(),
             llama_cpp_prompt_flag: "-p".to_string(),
@@ -98,6 +100,79 @@ pub struct AgentPromptRequest {
     pub mode: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AppPreferences {
+    pub search: String,
+    pub source_filter: String,
+    pub group_filter: String,
+    pub sort_key: String,
+    pub sort_direction: String,
+    pub agent_mode: String,
+    pub detail_open: bool,
+    pub form_open: bool,
+    pub selected_plist_path: Option<String>,
+    pub job_form_draft: Option<JobFormDraft>,
+    pub window_geometry: Option<WindowGeometry>,
+}
+
+impl Default for AppPreferences {
+    fn default() -> Self {
+        Self {
+            search: String::new(),
+            source_filter: "All".to_string(),
+            group_filter: "All".to_string(),
+            sort_key: "label".to_string(),
+            sort_direction: "asc".to_string(),
+            agent_mode: "approval".to_string(),
+            detail_open: false,
+            form_open: false,
+            selected_plist_path: None,
+            job_form_draft: None,
+            window_geometry: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WindowGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum JobFormScheduleType {
+    None,
+    Interval,
+    Calendar,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum JobFormHourMode {
+    Specific,
+    Every,
+    Range,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobFormHourRange {
+    pub from: u32,
+    pub to: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobFormDraft {
+    pub editing_plist_path: Option<String>,
+    pub config: crate::types::PlistConfig,
+    pub args: String,
+    pub schedule_type: JobFormScheduleType,
+    pub hour_mode: JobFormHourMode,
+    pub calendar_interval: Option<crate::types::CalendarInterval>,
+    pub hour_range: JobFormHourRange,
+}
+
 fn app_settings_dir() -> Result<PathBuf, AppError> {
     let dir = dirs::config_dir()
         .ok_or_else(|| AppError::AgentRuntime("could not determine config directory".to_string()))?
@@ -105,20 +180,50 @@ fn app_settings_dir() -> Result<PathBuf, AppError> {
     Ok(dir)
 }
 
+fn legacy_app_settings_dir() -> Result<PathBuf, AppError> {
+    let dir = dirs::config_dir()
+        .ok_or_else(|| AppError::AgentRuntime("could not determine config directory".to_string()))?
+        .join(LEGACY_APP_DIR_NAME);
+    Ok(dir)
+}
+
+fn read_json_with_legacy<T>(primary: PathBuf, legacy: PathBuf) -> Result<T, AppError>
+where
+    T: serde::de::DeserializeOwned + Default,
+{
+    match std::fs::read_to_string(&primary) {
+        Ok(contents) => serde_json::from_str(&contents)
+            .map_err(|e| AppError::AgentRuntime(format!("failed to parse {primary:?}: {e}"))),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::read_to_string(&legacy) {
+                Ok(contents) => serde_json::from_str(&contents).map_err(|e| {
+                    AppError::AgentRuntime(format!("failed to parse {legacy:?}: {e}"))
+                }),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+                Err(err) => Err(AppError::AgentRuntime(format!(
+                    "failed to read {legacy:?}: {err}"
+                ))),
+            }
+        }
+        Err(err) => Err(AppError::AgentRuntime(format!(
+            "failed to read {primary:?}: {err}"
+        ))),
+    }
+}
+
 fn settings_file() -> Result<PathBuf, AppError> {
     Ok(app_settings_dir()?.join(SETTINGS_FILE_NAME))
 }
 
+fn app_preferences_file() -> Result<PathBuf, AppError> {
+    Ok(app_settings_dir()?.join(APP_PREFERENCES_FILE_NAME))
+}
+
 pub fn load_agent_runtime_settings() -> Result<AgentRuntimeSettings, AppError> {
-    let path = settings_file()?;
-    match std::fs::read_to_string(&path) {
-        Ok(contents) => serde_json::from_str(&contents)
-            .map_err(|e| AppError::AgentRuntime(format!("failed to parse {path:?}: {e}"))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AgentRuntimeSettings::default()),
-        Err(e) => Err(AppError::AgentRuntime(format!(
-            "failed to read {path:?}: {e}"
-        ))),
-    }
+    read_json_with_legacy(
+        settings_file()?,
+        legacy_app_settings_dir()?.join(SETTINGS_FILE_NAME),
+    )
 }
 
 pub fn save_agent_runtime_settings(settings: &AgentRuntimeSettings) -> Result<(), AppError> {
@@ -132,6 +237,28 @@ pub fn save_agent_runtime_settings(settings: &AgentRuntimeSettings) -> Result<()
     }
     let json = serde_json::to_string_pretty(settings)
         .map_err(|e| AppError::AgentRuntime(format!("failed to serialize settings: {e}")))?;
+    std::fs::write(&path, json)
+        .map_err(|e| AppError::AgentRuntime(format!("failed to write {path:?}: {e}")))
+}
+
+pub fn load_app_preferences() -> Result<AppPreferences, AppError> {
+    read_json_with_legacy(
+        app_preferences_file()?,
+        legacy_app_settings_dir()?.join(APP_PREFERENCES_FILE_NAME),
+    )
+}
+
+pub fn save_app_preferences(preferences: &AppPreferences) -> Result<(), AppError> {
+    let path = app_preferences_file()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            AppError::AgentRuntime(format!(
+                "failed to create settings directory {parent:?}: {e}"
+            ))
+        })?;
+    }
+    let json = serde_json::to_string_pretty(preferences)
+        .map_err(|e| AppError::AgentRuntime(format!("failed to serialize preferences: {e}")))?;
     std::fs::write(&path, json)
         .map_err(|e| AppError::AgentRuntime(format!("failed to write {path:?}: {e}")))
 }

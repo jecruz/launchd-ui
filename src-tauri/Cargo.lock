@@ -444,6 +444,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "daemonic"
+version = "1.2.1"
+dependencies = [
+ "dirs",
+ "plist",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "darling"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1583,20 +1597,6 @@ dependencies = [
  "html5ever",
  "indexmap 2.13.0",
  "selectors",
-]
-
-[[package]]
-name = "launchd-ui"
-version = "1.2.0"
-dependencies = [
- "dirs",
- "plist",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tempfile",
- "thiserror 2.0.18",
 ]
 
 [[package]]

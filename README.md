@@ -1,8 +1,8 @@
-# Launch Control
+# Daemonic
 
 A tray-first macOS GUI for inspecting and controlling `launchd` jobs. Built with Tauri v2, React, TypeScript, and Rust.
 
-Launch Control focuses on fast menu bar access, safe user-agent control, and local agent assistance. The embedded assistant can summarize jobs, propose fixes, and draft launchctl actions, but model output is never executed as shell text.
+Daemonic — Master Your macOS Services. Daemonic focuses on fast menu bar access, safe user-agent control, and local agent assistance. The embedded assistant can summarize jobs, propose fixes, and draft launchctl actions, but model output is never executed as shell text.
 
 ![screenshot](screenshot.jpg)
 
@@ -23,8 +23,59 @@ Launch Control focuses on fast menu bar access, safe user-agent control, and loc
 - Proactive local job insights before prompting
 - In-session assistant conversation history
 - Semi-autonomous mode for safe user-agent start/kickstart proposals
+- Service grouping, tags, and log-health visibility for local infrastructure
+- Sidecar metadata fallback for services that cannot be tagged directly in the plist
+- Per-service health checks, port visibility, and group-level bulk actions
+- Common service templates plus a local Docker/OrbStack migration assistant
+- Deterministic repair diagnostics with log excerpts and safe metadata fixes
 
 System Agents and Daemons are read-only. Modification operations are limited to User Agents under `~/Library/LaunchAgents`.
+
+## Service Groups And Tags
+
+Daemonic stores optional app metadata inside each plist under a namespaced `LaunchControl` dictionary. `launchd` ignores these keys, while this app uses them to group related services such as `CAISS System`.
+
+```xml
+<key>LaunchControl</key>
+<dict>
+  <key>Group</key>
+  <string>CAISS System</string>
+  <key>Tags</key>
+  <array>
+    <string>caiss</string>
+    <string>api</string>
+    <string>local-infra</string>
+  </array>
+  <key>ManagedBy</key>
+  <string>Daemonic</string>
+  <key>Description</key>
+  <string>CAISS API service</string>
+  <key>Environment</key>
+  <string>local</string>
+</dict>
+```
+
+The main dashboard summarizes each group by service count, running count, jobs needing attention, and log coverage. The job table also exposes group, tags, health, and configured stdout/stderr paths so local launchd services stay visible after moving away from Docker or OrbStack.
+
+When a plist cannot be modified directly, Daemonic also keeps a durable sidecar index in `~/Library/Application Support/Daemonic/service-overrides.json`. That index stores the same grouping and visibility metadata, including:
+
+- `Group`
+- `Tags`
+- `ManagedBy`
+- `Description`
+- `Environment`
+- `HealthCheckURL`
+- `HealthCheckCommand`
+- `Ports`
+- `Template`
+- `MigrationHint`
+- `HealthStatus`
+- `HealthDetail`
+- `LastHealthCheckAt`
+
+The job detail pane can run the configured health check and persist the latest result back into that sidecar index. Bulk group actions are available from the dashboard cards for user agents only.
+
+If a service has no explicit health URL or command, Daemonic falls back to lightweight local heuristics based on configured ports and a few common service labels. When nothing is configured it reports `unknown` instead of failing hard, so the user still gets a status readout.
 
 ## Agent Workflow
 
@@ -47,7 +98,22 @@ Configure the local assistant from the agent panel:
 - `llama.cpp / yama.cpp`: runs a local executable with model and prompt flags.
 - `Custom local CLI`: supports stdin or prompt-argument mode.
 
-The control surface shows readiness checks for executable, model, host, and prompt mode. Prompt execution stays disabled until the selected provider is complete. Use `Smoke Test Runtime` to verify the local runtime before sending job context.
+Quick start:
+
+1. Pick a provider and fill in the required local executable/model fields.
+2. Click `Save Runtime`.
+3. Click `Smoke Test Runtime` and confirm it returns a short success response.
+4. Choose `Summarize`, `Plan fix`, or `Propose command`, then click `Run Prompt`.
+5. Use the `LLM draft` or `Migration assistant` panels in `New Agent` to prefill a LaunchAgent from a natural-language request or a Docker/OrbStack service definition.
+6. In a job’s `Health` panel, click `Repair` to open the editor with inferred health check URL or command defaults when the service type is recognizable.
+7. For `ai.hermes.gateway`, normal startup markers like `Gateway running`, `api server listening`, and `telegram connected` are treated as healthy even if older stderr warnings remain in the log tail.
+8. If a log excerpt has no timestamps, Daemonic treats it as potentially stale and avoids upgrading that excerpt to a hard `unhealthy` or `Repair` state by itself.
+9. When a job has no explicit health check configured and no concrete repair suggestion, the Health panel stays informational and hides the `Repair` button.
+10. Hover any code or log block to reveal a copy button. Press `Cmd/Ctrl+A` while the block is focused to select all text inside it, then click copy to capture the selected text or the raw block. Click a job label or file path label to copy it directly.
+11. `New Agent` always starts a blank draft, even if you were editing a different plist before. Calendar schedule edits are preserved in the durable draft state until you save or cancel.
+12. In the `Schedule` section, use the `Calendar agent` presets for common clock-based jobs: `Daily 9:00`, `Weekdays 9:00`, or `Every hour`.
+
+The control surface shows readiness checks for executable, model, host, and prompt mode. Prompt execution stays disabled until the selected provider is complete. This is a local tool runner, not a remote chat API.
 
 ## Assistant Modes
 
@@ -68,18 +134,20 @@ Semi-autonomous mode is deliberately conservative. When enabled, only safe user-
 
 ## Install
 
-This app is not code-signed. Download and install via CLI:
+This app is not code-signed. For local updates, build the app and install it into `/Applications`:
 
 ```bash
-# Download and extract (Apple Silicon)
-curl -L "https://github.com/azu/launchd-ui/releases/latest/download/launchd-ui_aarch64.app.tar.gz" | tar xz -C /Applications
-# Remove quarantine attribute (required for unsigned apps)
-xattr -cr /Applications/launchd-ui.app
+cd /Users/jeffreycruz/Development/TOOLS/daemonic
+pnpm package:macos:install
 ```
 
-For Intel Macs, replace `aarch64` with `x64`.
+This command rebuilds `Daemonic.app`, installs it to `/Applications/Daemonic.app`, and clears quarantine on the installed copy.
 
-DMG installers are also available on the [Releases](https://github.com/azu/launchd-ui/releases) page.
+## macOS Antivirus Notes
+
+- The Rust build output under `src-tauri/target/` is disposable compiler output.
+- If your antivirus or endpoint protection flags a file there, exclude `src-tauri/target/` rather than the shipped `.app` bundle.
+- The release bundle is the artifact to inspect and distribute: `src-tauri/target/release/bundle/macos/Daemonic.app`.
 
 ## Tech Stack
 
@@ -101,8 +169,28 @@ pnpm tauri:dev
 # Frontend only
 pnpm dev
 
-# Production build (DMG)
+# Production build plus install to /Applications
+pnpm package:macos:install
+
+# Production DMG
 pnpm tauri:build
+```
+
+## Compile And Run
+
+For a local build and manual launch:
+
+```bash
+cd /Users/jeffreycruz/Development/TOOLS/daemonic
+pnpm install
+pnpm tauri:build
+open /Applications/Daemonic.app
+```
+
+If macOS blocks the unsigned app, remove quarantine first:
+
+```bash
+xattr -cr /Applications/Daemonic.app
 ```
 
 ## Testing / Lint

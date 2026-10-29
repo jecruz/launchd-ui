@@ -13,6 +13,25 @@ const selectedJob: JobListEntry = {
   source: "UserAgent",
   status: "Running",
   last_run_at: null,
+  metadata: {
+    group: "CAISS System",
+    tags: ["caiss"],
+    managed_by: "Daemonic",
+    description: "Running agent",
+    environment: "local",
+    health_check_url: "http://127.0.0.1:8001/health",
+    health_check_command: null,
+    ports: [8001],
+    template: "api",
+    migration_hint: "docker-compose",
+    health_status: "healthy",
+    health_detail: "GET http://127.0.0.1:8001/health succeeded",
+    last_health_check_at: String(Date.now()),
+  },
+  log_paths: {
+    stdout: "/tmp/running-agent.stdout.log",
+    stderr: "/tmp/running-agent.stderr.log",
+  },
 }
 
 function installProposalHandlers(job: JobListEntry) {
@@ -183,6 +202,20 @@ describe("AgentPanel timeline", () => {
     await screen.findByText("Conversation history")
     expect(screen.getByText("Last local assistant turns")).toBeInTheDocument()
     expect(screen.getByText("Command proposed")).toBeInTheDocument()
+  })
+
+  it("explains the local runtime setup flow", async () => {
+    render(<AgentPanel mode="approval" selectedJob={selectedJob} onApplied={vi.fn()} />)
+
+    expect(await screen.findByText("How it works")).toBeInTheDocument()
+    expect(screen.getByText("Configure a local model tool, then test it before prompting")).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        "The local agent does not call a remote chat API. It launches the executable you configure in this panel and writes the runtime settings to disk so they persist across launches."
+      )
+    ).toBeInTheDocument()
+    expect(screen.getByText("Choose a local provider")).toBeInTheDocument()
+    expect(screen.getByText("Run the prompt")).toBeInTheDocument()
   })
 
   it("auto-applies safe user-agent proposals when semi-autonomous mode is enabled", async () => {

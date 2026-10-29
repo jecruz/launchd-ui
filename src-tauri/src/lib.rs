@@ -3,13 +3,15 @@ mod commands;
 mod error;
 mod launchctl;
 mod plist_util;
+mod service_overlays;
 mod types;
 
+use tauri::image::Image;
 use tauri::menu::{MenuBuilder, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
 
-const TRAY_COMMAND_EVENT: &str = "launchd-ui:command";
+const TRAY_COMMAND_EVENT: &str = "daemonic:command";
 
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -20,12 +22,23 @@ fn show_main_window(app: &tauri::AppHandle) {
     let _ = app.show();
 }
 
+fn tray_icon_image(app: &tauri::App) -> Image<'static> {
+    app.default_window_icon()
+        .map(|icon| Image::new_owned(icon.rgba().to_vec(), icon.width(), icon.height()))
+        .unwrap_or_else(|| Image::new_owned(vec![0, 0, 0, 0], 1, 1))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            let open_item =
-                MenuItem::with_id(app, "open", "Open Launch Control", true, None::<&str>)?;
+            #[cfg(target_os = "macos")]
+            {
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                app.set_dock_visibility(false);
+            }
+
+            let open_item = MenuItem::with_id(app, "open", "Open Daemonic", true, None::<&str>)?;
             let refresh_item =
                 MenuItem::with_id(app, "refresh", "Refresh Jobs", true, None::<&str>)?;
             let new_agent_item =
@@ -37,12 +50,8 @@ pub fn run() {
                 .build()?;
 
             let _tray = TrayIconBuilder::new()
-                .icon(
-                    app.default_window_icon()
-                        .expect("missing default app icon")
-                        .clone(),
-                )
-                .tooltip("Launch Control")
+                .icon(tray_icon_image(app))
+                .tooltip("Daemonic")
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_tray_icon_event(|tray, event| match event {
@@ -60,6 +69,8 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            show_main_window(app.handle());
 
             app.on_menu_event(|app_handle, event| match event.id().0.as_str() {
                 "open" => {
@@ -80,10 +91,6 @@ pub fn run() {
                 _ => {}
             });
 
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.hide();
-            }
-
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -99,6 +106,8 @@ pub fn run() {
             commands::save_raw_plist,
             commands::create_job,
             commands::delete_job,
+            commands::check_service_health,
+            commands::diagnose_service,
             commands::read_log_file,
             commands::clear_log_file,
             commands::open_log_in_editor,
@@ -106,6 +115,8 @@ pub fn run() {
             commands::reveal_in_finder,
             commands::get_agent_runtime_settings,
             commands::save_agent_runtime_settings,
+            commands::get_app_preferences,
+            commands::save_app_preferences,
             commands::get_agent_runtime_summary,
             commands::run_agent_prompt,
             commands::apply_approved_agent_action,

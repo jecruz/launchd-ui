@@ -1,8 +1,8 @@
-# FUBAR Project Context: launchd-ui
+# FUBAR Project Context: Daemonic
 
 ## Overview
 
-`launchd-ui` is a macOS desktop app for inspecting and controlling launchd jobs. It is being evolved into a tray-first `Launch Control` app with local agent assistance, structured approval workflows, and deterministic launchctl execution.
+`Daemonic` is a macOS desktop app for inspecting and controlling launchd jobs. It is being evolved into a tray-first macOS services app with local agent assistance, structured approval workflows, and deterministic launchctl execution.
 
 ## Stack
 

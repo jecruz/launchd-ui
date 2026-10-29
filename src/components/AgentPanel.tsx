@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { CopyableCodeBlock } from "@/components/CopyableBlock"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { describeHealth } from "@/lib/health"
 import type {
   AgentRuntimeProvider,
   AgentRuntimeSettings,
@@ -76,6 +78,10 @@ function buildJobContext(job: JobListEntry | null): string | null {
     `PID: ${job.pid ?? "—"}`,
     `Last exit code: ${job.last_exit_code ?? "—"}`,
     `Plist path: ${job.plist_path}`,
+    `Group: ${job.metadata.group ?? "Ungrouped"}`,
+    `Tags: ${job.metadata.tags.length > 0 ? job.metadata.tags.join(", ") : "—"}`,
+    `Ports: ${job.metadata.ports.length > 0 ? job.metadata.ports.join(", ") : "—"}`,
+    `Health: ${describeHealth(job)}`,
   ].join("\n")
 }
 
@@ -110,6 +116,10 @@ function buildDetailedJobContext(job: LaunchdJob | null): string | null {
     `WorkingDirectory: ${plist.working_directory ?? "—"}`,
     `Stdout: ${plist.standard_out_path ?? "—"}`,
     `Stderr: ${plist.standard_error_path ?? "—"}`,
+    `HealthCheckURL: ${plist.metadata.health_check_url ?? "—"}`,
+    `HealthCheckCommand: ${plist.metadata.health_check_command ?? "—"}`,
+    `Ports: ${plist.metadata.ports.length > 0 ? plist.metadata.ports.join(", ") : "—"}`,
+    `Template: ${plist.metadata.template ?? "—"}`,
     `EnvironmentVariables:\n${envLines}`,
     `Disabled: ${plist.disabled ?? "—"}`,
     `WakeSystem: ${plist.wake_system ?? "—"}`,
@@ -229,6 +239,14 @@ function buildProactiveInsights(job: JobListEntry | null, detail: LaunchdJob | n
   }
   if (plist?.standard_error_path) {
     insights.push(`stderr is configured at ${plist.standard_error_path}.`)
+  }
+  if (plist?.metadata.ports.length) {
+    insights.push(`Ports configured: ${plist.metadata.ports.join(", ")}.`)
+  }
+  if (plist?.metadata.health_check_url) {
+    insights.push(`Health check URL configured: ${plist.metadata.health_check_url}.`)
+  } else if (plist?.metadata.health_check_command) {
+    insights.push("Health check command configured for the selected job.")
   }
 
   return insights.length ? insights : ["No obvious risk flags from the current job snapshot."]
@@ -357,6 +375,7 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
           environment_variables: null,
           disabled: null,
           wake_system: null,
+          metadata: selectedJob.metadata,
           raw_xml: "",
         },
         label: selectedJob.label,
@@ -599,6 +618,30 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
         summary.details[0] ??
         "Complete the selected provider settings."
       : null
+  const runtimeHowToSteps = [
+    {
+      title: "Choose a local provider",
+      detail:
+        providerOptions.find((option) => option.value === provider)?.label ??
+        "Select Ollama, llama.cpp / yama.cpp, or a custom local CLI.",
+    },
+    {
+      title: "Fill the required fields",
+      detail: runtimeBlockedReason ?? "Enter the local executable, model, or prompt mode settings.",
+    },
+    {
+      title: "Save and smoke test",
+      detail:
+        runtimeReady
+          ? "Save Runtime writes the config file. Smoke Test Runtime should return a short success response."
+          : "Save Runtime stays disabled until the configuration is complete.",
+    },
+    {
+      title: "Run the prompt",
+      detail:
+        "Pick Summarize, Plan fix, or Propose command, then Run Prompt. Proposals still require approval unless semi-autonomous mode is enabled.",
+    },
+  ]
 
   const updateSettings = (patch: Partial<AgentRuntimeSettings>) => {
     setSettings((current) => {
@@ -750,6 +793,40 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
       )}
 
       <div className="mt-4 grid gap-4">
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-xs uppercase tracking-[0.24em] text-slate-400">
+                How it works
+              </p>
+              <h4 className="mt-1 text-base font-semibold text-white">
+                Configure a local model tool, then test it before prompting
+              </h4>
+            </div>
+            <Badge className="border-white/10 bg-white/5 text-slate-100 hover:bg-white/5">
+              Local only
+            </Badge>
+          </div>
+          <div className="mt-3 grid gap-2">
+            {runtimeHowToSteps.map((step, index) => (
+              <div key={step.title} className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                <div className="flex items-start gap-3">
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-cyan-400/15 text-xs font-semibold text-cyan-50">
+                    {index + 1}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-white">{step.title}</p>
+                    <p className="mt-1 text-xs leading-5 text-slate-300">{step.detail}</p>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="mt-3 text-xs leading-5 text-slate-400">
+            The local agent does not call a remote chat API. It launches the executable you configure in this panel and writes the runtime settings to disk so they persist across launches.
+          </p>
+        </div>
+
         <div className="rounded-3xl border border-sky-400/15 bg-sky-400/10 p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -1004,7 +1081,7 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
           <Button
             onClick={handleSave}
             disabled={saving || !settings}
-            className="bg-cyan-500 text-slate-950 hover:bg-cyan-400"
+            className="min-w-32 bg-cyan-500 text-slate-950 hover:bg-cyan-400"
           >
             {saving ? "Saving..." : "Save Runtime"}
           </Button>
@@ -1017,7 +1094,7 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
               !runtimeReady ||
               (activeAction === "proposal" && !approvalConfirmed && !autoApplySafeActions)
             }
-            className="border-white/10 bg-white/5 text-slate-100 hover:bg-white/10"
+            className="min-w-36 border-white/10 bg-white/5 text-slate-100 hover:bg-white/10"
           >
             {running
               ? "Running..."
@@ -1031,7 +1108,7 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
             variant="outline"
             onClick={handleSmokeTest}
             disabled={smokeRunning || !settings || !runtimeReady}
-            className="border-cyan-400/20 bg-cyan-400/10 text-cyan-50 hover:bg-cyan-400/20"
+            className="min-w-44 border-cyan-400/20 bg-cyan-400/10 text-cyan-50 hover:bg-cyan-400/20"
           >
             {smokeRunning ? "Testing..." : "Smoke Test Runtime"}
           </Button>
@@ -1039,14 +1116,19 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
         {runtimeBlockedReason && (
           <p className="text-xs text-amber-100/80">{runtimeBlockedReason}</p>
         )}
-        {smokeResult && (
-          <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 p-3 text-sm text-cyan-50">
-            <p className="text-[11px] uppercase tracking-[0.22em] text-cyan-100/70">
-              Smoke result
-            </p>
-            <p className="mt-1 font-mono text-xs leading-5">{smokeResult}</p>
-          </div>
-        )}
+        <div
+          className={[
+            "rounded-2xl border border-cyan-400/20 bg-cyan-400/10 p-3 text-sm text-cyan-50 transition-[opacity,transform] duration-150",
+            smokeResult ? "opacity-100 translate-y-0" : "min-h-16 opacity-0 translate-y-1 pointer-events-none",
+          ].join(" ")}
+        >
+          <p className="text-[11px] uppercase tracking-[0.22em] text-cyan-100/70">
+            Smoke result
+          </p>
+          <p className="mt-1 font-mono text-xs leading-5">
+            {smokeResult ?? "Waiting for a smoke test result."}
+          </p>
+        </div>
 
         <div className="rounded-3xl border border-white/10 bg-white/5 p-4">
           <div className="flex items-center justify-between gap-3">
@@ -1249,9 +1331,15 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
                   <p className="mt-2 text-sm font-medium text-white">{entry.summary}</p>
                   <details className="mt-2 text-xs text-slate-300">
                     <summary className="cursor-pointer text-cyan-200">Show prompt and response</summary>
-                    <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-white/10 bg-slate-950/70 p-3 font-mono leading-5">
-                      {`Prompt:\n${entry.prompt}\n\nResponse:\n${entry.response}`}
-                    </pre>
+                    <CopyableCodeBlock
+                      text={`Prompt:\n${entry.prompt}\n\nResponse:\n${entry.response}`}
+                      copyLabel="Copy conversation details"
+                      className="mt-2"
+                    >
+                      <pre className="whitespace-pre-wrap rounded-xl border border-white/10 bg-slate-950/70 p-3 font-mono leading-5">
+                        {`Prompt:\n${entry.prompt}\n\nResponse:\n${entry.response}`}
+                      </pre>
+                    </CopyableCodeBlock>
                   </details>
                 </div>
               ))}
@@ -1302,7 +1390,9 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
                   <p className="mb-2 uppercase tracking-[0.24em] text-slate-500">
                     Selected job context
                   </p>
-                  <pre className="whitespace-pre-wrap font-mono leading-5">{jobContext}</pre>
+                  <CopyableCodeBlock text={jobContext} copyLabel="Copy selected job context">
+                    <pre className="whitespace-pre-wrap font-mono leading-5">{jobContext}</pre>
+                  </CopyableCodeBlock>
                 </div>
               )}
               {jobDetail && (
@@ -1310,9 +1400,14 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
                   <p className="mb-2 uppercase tracking-[0.24em] text-slate-500">
                     Full plist context
                   </p>
-                  <pre className="whitespace-pre-wrap font-mono leading-5">
-                    {buildDetailedJobContext(jobDetail)}
-                  </pre>
+                  <CopyableCodeBlock
+                    text={buildDetailedJobContext(jobDetail) ?? ""}
+                    copyLabel="Copy full plist context"
+                  >
+                    <pre className="whitespace-pre-wrap font-mono leading-5">
+                      {buildDetailedJobContext(jobDetail)}
+                    </pre>
+                  </CopyableCodeBlock>
                 </div>
               )}
               {commandLine && (
@@ -1320,7 +1415,9 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
                   <p className="mb-2 uppercase tracking-[0.24em] text-slate-500">
                     Last command
                   </p>
-                  <pre className="whitespace-pre-wrap font-mono leading-5">{commandLine}</pre>
+                  <CopyableCodeBlock text={commandLine} copyLabel="Copy last command">
+                    <pre className="whitespace-pre-wrap font-mono leading-5">{commandLine}</pre>
+                  </CopyableCodeBlock>
                 </div>
               )}
             </div>
@@ -1374,9 +1471,15 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
                     <p className="text-xs uppercase tracking-[0.22em] text-cyan-200">
                       Command proposal
                     </p>
-                    <pre className="mt-2 whitespace-pre-wrap font-mono text-xs leading-5 text-cyan-50">
-                      {structuredResult.command_proposal}
-                    </pre>
+                    <CopyableCodeBlock
+                      text={structuredResult.command_proposal}
+                      copyLabel="Copy command proposal"
+                      className="mt-2"
+                    >
+                      <pre className="whitespace-pre-wrap font-mono text-xs leading-5 text-cyan-50">
+                        {structuredResult.command_proposal}
+                      </pre>
+                    </CopyableCodeBlock>
                   </div>
                 )}
                 <div className="flex items-center justify-between rounded-lg border border-white/10 bg-black/20 p-3 text-xs text-cyan-100">
@@ -1400,7 +1503,9 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
                 <p className="mb-2 text-xs uppercase tracking-[0.24em] text-emerald-300">
                   Model response
                 </p>
-                <pre className="whitespace-pre-wrap font-mono leading-5">{response}</pre>
+                <CopyableCodeBlock text={response} copyLabel="Copy model response">
+                  <pre className="whitespace-pre-wrap font-mono leading-5">{response}</pre>
+                </CopyableCodeBlock>
               </div>
             )}
           </div>

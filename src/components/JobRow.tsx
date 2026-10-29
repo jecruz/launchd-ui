@@ -4,10 +4,11 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { TableCell, TableRow } from "@/components/ui/table"
+import { deriveHealthText } from "@/lib/health"
+import { CopyableInlineText } from "@/components/CopyableBlock"
 import type { JobListEntry } from "@/types"
 import {
   Play,
@@ -18,6 +19,7 @@ import {
   FileText,
   FolderOpen,
   Zap,
+  Pencil,
 } from "lucide-react"
 
 function formatRelativeTime(epochMillis: string): string {
@@ -42,6 +44,7 @@ type JobRowProps = {
   onStop: (job: JobListEntry) => void
   onRestart: (job: JobListEntry) => void
   onKickstart: (job: JobListEntry) => void
+  onEdit: (job: JobListEntry) => void
   onDelete: (job: JobListEntry) => void
   onSelect: (job: JobListEntry) => void
   onRevealInFinder: (job: JobListEntry) => void
@@ -87,12 +90,29 @@ function SourceBadge({ source }: { source: JobListEntry["source"] }) {
   }
 }
 
+function healthText(job: JobListEntry) {
+  return deriveHealthText(job)
+}
+
+function logCoverage(job: JobListEntry) {
+  const count = [job.log_paths.stdout, job.log_paths.stderr].filter(Boolean).length
+  if (count === 2) return "2 logs"
+  if (count === 1) return "1 log"
+  return "No logs"
+}
+
+function portCoverage(job: JobListEntry) {
+  if (job.metadata.ports.length === 0) return null
+  return job.metadata.ports.slice(0, 3).map((port) => String(port))
+}
+
 export function JobRow({
   job,
   onStart,
   onStop,
   onRestart,
   onKickstart,
+  onEdit,
   onDelete,
   onSelect,
   onRevealInFinder,
@@ -104,7 +124,46 @@ export function JobRow({
       className="cursor-pointer hover:bg-muted/50"
       onClick={() => onSelect(job)}
     >
-      <TableCell className="font-medium truncate max-w-0">{job.label}</TableCell>
+      <TableCell className="font-medium max-w-[18rem]">
+        <div onClick={(event) => event.stopPropagation()}>
+          <CopyableInlineText
+            text={job.label}
+            copyLabel={`Copy label ${job.label}`}
+            className="w-full justify-start font-medium"
+          />
+        </div>
+        {job.metadata.description && (
+          <div className="mt-1 truncate text-xs font-normal text-muted-foreground">
+            {job.metadata.description}
+          </div>
+        )}
+      </TableCell>
+      <TableCell className="max-w-[12rem]">
+        <div className="truncate text-sm">
+          {job.metadata.group ?? "Ungrouped"}
+        </div>
+        {job.metadata.tags.length > 0 && (
+          <div className="mt-1 flex max-w-full flex-wrap gap-1">
+            {job.metadata.tags.slice(0, 2).map((tag) => (
+              <Badge key={tag} variant="outline" className="px-1.5 py-0 text-[10px]">
+                {tag}
+              </Badge>
+            ))}
+            {job.metadata.tags.length > 2 && (
+              <span className="text-[10px] text-muted-foreground">+{job.metadata.tags.length - 2}</span>
+            )}
+          </div>
+        )}
+        {portCoverage(job) && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {portCoverage(job)?.map((port) => (
+              <Badge key={port} variant="secondary" className="px-1.5 py-0 text-[10px]">
+                {port}
+              </Badge>
+            ))}
+          </div>
+        )}
+      </TableCell>
       <TableCell>
         <SourceBadge source={job.source} />
       </TableCell>
@@ -118,7 +177,24 @@ export function JobRow({
         {job.last_run_at ? formatRelativeTime(job.last_run_at) : "—"}
       </TableCell>
       <TableCell>
-        <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+        <div className="text-xs">
+          <div
+            className={[
+              "font-medium",
+              healthText(job) === "Attention"
+                ? "text-rose-500"
+                : healthText(job) === "Running"
+                  ? "text-emerald-600"
+                  : "text-muted-foreground",
+            ].join(" ")}
+          >
+            {healthText(job)}
+          </div>
+          <div className="text-muted-foreground">{logCoverage(job)}</div>
+        </div>
+      </TableCell>
+      <TableCell className="sticky right-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+        <div className="flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
           {job.status === "Running" ? (
             <Button
               variant="ghost"
@@ -165,6 +241,26 @@ export function JobRow({
               <RotateCw className="h-4 w-4" />
             </Button>
           )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            onClick={() => onEdit(job)}
+            disabled={!isUserAgent}
+            title={isUserAgent ? "Edit" : "Cannot edit system agents"}
+          >
+            <Pencil className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            onClick={() => onDelete(job)}
+            disabled={!isUserAgent}
+            title={isUserAgent ? "Delete" : "Cannot delete system agents"}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="icon" className="h-8 w-8">
@@ -184,18 +280,6 @@ export function JobRow({
                 <FolderOpen className="mr-2 h-4 w-4" />
                 Reveal in Finder
               </DropdownMenuItem>
-              {isUserAgent && (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    className="text-destructive"
-                    onClick={() => onDelete(job)}
-                  >
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    Delete
-                  </DropdownMenuItem>
-                </>
-              )}
             </DropdownMenuContent>
           </DropdownMenu>
         </div>

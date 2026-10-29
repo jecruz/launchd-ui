@@ -1,4 +1,4 @@
-# FUBAR Research: launchd-ui
+# FUBAR Research: Daemonic
 
 ## Repo Shape
 

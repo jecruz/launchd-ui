@@ -1,5 +1,5 @@
 {
-  "name": "launchd-ui",
+  "name": "daemonic",
   "private": true,
   "version": "1.2.1",
   "packageManager": "pnpm@10.28.2",
@@ -13,7 +13,10 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
+    "tauri:build": "tauri build --bundles app",
+    "install:macos": "bash scripts/install-macos-app.sh",
+    "package:macos:install": "pnpm tauri:build && pnpm install:macos",
+    "package:macos:dmg": "bash scripts/package-macos-dmg.sh",
     "preview": "vite preview",
     "version:patch": "node scripts/bump-version.ts patch && git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock && git commit -m \"chore: bump version to $(node -p \"require('./package.json').version\")\" && git tag v$(node -p \"require('./package.json').version\")",
     "version:minor": "node scripts/bump-version.ts minor && git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock && git commit -m \"chore: bump version to $(node -p \"require('./package.json').version\")\" && git tag v$(node -p \"require('./package.json').version\")",

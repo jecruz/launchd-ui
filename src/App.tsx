@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { listen } from "@tauri-apps/api/event"
 import { hide as hideApp, show as showApp, setDockVisibility } from "@tauri-apps/api/app"
-import { getCurrentWindow } from "@tauri-apps/api/window"
+import { getCurrentWindow, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/window"
 import { ArrowUpRight, Bot, Layers3, Plus, RefreshCw, Shield, Sparkles, TerminalSquare, Activity } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -13,24 +13,41 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { JobDetail } from "@/components/JobDetail"
-import { JobForm } from "@/components/JobForm"
+import {
+  createEmptyJobFormDraft,
+  createJobFormDraftFromJob,
+  createRepairJobFormDraftFromJob,
+  JobForm,
+} from "@/components/JobForm"
 import { JobList } from "@/components/JobList"
 import { SearchBar } from "@/components/SearchBar"
 import { AgentPanel } from "@/components/AgentPanel"
 import { useJobs } from "@/hooks/useJobs"
+import { deriveHealthText } from "@/lib/health"
 import {
   createJob,
   deleteJob,
+  getAppPreferences,
+  getJobDetail,
   kickstartJob,
   revealInFinder,
   restartJob,
   saveJob,
+  saveAppPreferences,
   startJob,
   stopJob,
 } from "@/lib/invoke"
-import type { JobListEntry, LaunchdJob, PlistConfig } from "@/types"
+import type {
+  AppPreferences,
+  JobListEntry,
+  JobSortKey,
+  LaunchdJob,
+  PlistConfig,
+  ServiceDiagnosis,
+  SortDirection,
+} from "@/types"
 
-const TRAY_COMMAND_EVENT = "launchd-ui:command"
+const TRAY_COMMAND_EVENT = "daemonic:command"
 
 type AgentMode = "copilot" | "approval" | "assistant"
 
@@ -65,6 +82,15 @@ const modeCards: ModeCard[] = [
   },
 ]
 
+const bulkActionLabels: Record<"start" | "stop" | "restart" | "kickstart", string> = {
+  start: "Start",
+  stop: "Stop",
+  restart: "Restart",
+  kickstart: "Test Run",
+}
+
+const MIN_WINDOW_HEIGHT = 940
+
 function ModeBadge({ mode }: { mode: AgentMode }) {
   const card = modeCards.find((item) => item.id === mode)!
   return (
@@ -74,7 +100,58 @@ function ModeBadge({ mode }: { mode: AgentMode }) {
   )
 }
 
+const defaultPreferences: AppPreferences = {
+  search: "",
+  source_filter: "All",
+  group_filter: "All",
+  sort_key: "health",
+  sort_direction: "asc",
+  agent_mode: "approval",
+  detail_open: false,
+  form_open: false,
+  selected_plist_path: null,
+  job_form_draft: null,
+  window_geometry: null,
+}
+
+function normalizePreferences(preferences: AppPreferences | null): AppPreferences {
+  if (!preferences) return defaultPreferences
+  return {
+    search: preferences.search ?? "",
+    source_filter: preferences.source_filter ?? "All",
+    group_filter: preferences.group_filter ?? "All",
+    sort_key: preferences.sort_key ?? "health",
+    sort_direction: preferences.sort_direction ?? "asc",
+    agent_mode: preferences.agent_mode ?? "approval",
+    detail_open: preferences.detail_open ?? false,
+    form_open: preferences.form_open ?? false,
+    selected_plist_path: preferences.selected_plist_path ?? null,
+    job_form_draft: preferences.job_form_draft ?? null,
+    window_geometry: preferences.window_geometry ?? null,
+  }
+}
+
+function normalizeJobFormDraft(draft: AppPreferences["job_form_draft"]): AppPreferences["job_form_draft"] {
+  if (!draft) return null
+  return {
+    ...draft,
+    calendar_interval: draft.calendar_interval ?? null,
+  }
+}
+
+function sameWindowGeometry(
+  a: AppPreferences["window_geometry"],
+  b: AppPreferences["window_geometry"]
+) {
+  if (a === b) return true
+  if (!a || !b) return false
+  return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
+}
+
 function App() {
+  const [preferences, setPreferences] = useState<AppPreferences>(defaultPreferences)
+  const [preferencesReady, setPreferencesReady] = useState(false)
+  const [agentMode, setAgentMode] = useState<AgentMode>("approval")
   const {
     jobs,
     filteredJobs,
@@ -84,22 +161,115 @@ function App() {
     setSearch,
     sourceFilter,
     setSourceFilter,
+    groupFilter,
+    setGroupFilter,
+    sortKey,
+    setSortKey,
+    sortDirection,
+    setSortDirection,
     refresh,
-  } = useJobs()
+  } = useJobs({
+    search: preferences.search,
+    sourceFilter: preferences.source_filter,
+    groupFilter: preferences.group_filter,
+    sortKey: preferences.sort_key as JobSortKey,
+    sortDirection: preferences.sort_direction as SortDirection,
+  })
 
   const [selectedPlistPath, setSelectedPlistPath] = useState<string | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
   const [formOpen, setFormOpen] = useState(false)
   const [formKey, setFormKey] = useState(0)
+  const [jobFormDraft, setJobFormDraft] = useState<AppPreferences["job_form_draft"]>(null)
+  const [windowGeometry, setWindowGeometry] = useState<AppPreferences["window_geometry"]>(null)
   const [editingJob, setEditingJob] = useState<LaunchdJob | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<JobListEntry | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
-  const [agentMode, setAgentMode] = useState<AgentMode>("approval")
 
   const selectedJob = useMemo(
     () => jobs.find((job) => job.plist_path === selectedPlistPath) ?? null,
     [jobs, selectedPlistPath]
   )
+
+  useEffect(() => {
+    let cancelled = false
+
+    const bootstrapPreferences = async () => {
+      try {
+        const saved = normalizePreferences(await getAppPreferences())
+        if (cancelled) return
+        setPreferences(saved)
+        setAgentMode(saved.agent_mode)
+        setSearch(saved.search)
+        setSourceFilter(saved.source_filter)
+        setGroupFilter(saved.group_filter)
+        setSortKey(saved.sort_key as JobSortKey)
+        setSortDirection(saved.sort_direction as SortDirection)
+        setDetailOpen(saved.detail_open)
+        setFormOpen(saved.form_open)
+        setSelectedPlistPath(saved.selected_plist_path)
+        setJobFormDraft(normalizeJobFormDraft(saved.job_form_draft))
+        setWindowGeometry(saved.window_geometry)
+      } catch {
+        if (!cancelled) {
+          setPreferences(defaultPreferences)
+        }
+      } finally {
+        if (!cancelled) {
+          setPreferencesReady(true)
+        }
+      }
+    }
+
+    void bootstrapPreferences()
+
+    return () => {
+      cancelled = true
+    }
+  }, [setGroupFilter, setSearch, setSourceFilter, setSortKey, setSortDirection])
+
+  useEffect(() => {
+    if (!preferencesReady) return
+    void saveAppPreferences({
+      search,
+      source_filter: sourceFilter,
+      group_filter: groupFilter,
+      sort_key: sortKey,
+      sort_direction: sortDirection,
+      agent_mode: agentMode,
+      detail_open: detailOpen,
+      form_open: formOpen,
+      selected_plist_path: selectedPlistPath,
+      job_form_draft: jobFormDraft,
+      window_geometry: windowGeometry,
+    }).catch(() => undefined)
+    setPreferences({
+      search,
+      source_filter: sourceFilter,
+      group_filter: groupFilter,
+      sort_key: sortKey,
+      sort_direction: sortDirection,
+      agent_mode: agentMode,
+      detail_open: detailOpen,
+      form_open: formOpen,
+      selected_plist_path: selectedPlistPath,
+      job_form_draft: jobFormDraft,
+      window_geometry: windowGeometry,
+    })
+  }, [
+    agentMode,
+    detailOpen,
+    formOpen,
+    jobFormDraft,
+    preferencesReady,
+    selectedPlistPath,
+    windowGeometry,
+    search,
+    groupFilter,
+    sourceFilter,
+    sortDirection,
+    sortKey,
+  ])
 
   const handleAction = useCallback(
     async (action: () => Promise<void>) => {
@@ -132,8 +302,6 @@ function App() {
 
     const bootstrap = async () => {
       await setDockVisibility(false).catch(() => undefined)
-      await hideApp().catch(() => undefined)
-      await currentWindow.hide().catch(() => undefined)
 
       unlistenClose = await currentWindow.onCloseRequested(async (event) => {
         event.preventDefault()
@@ -156,6 +324,7 @@ function App() {
         if (event.payload === "new-agent") {
           await openControlCenter()
           setEditingJob(null)
+          setJobFormDraft(createEmptyJobFormDraft())
           setFormKey((k) => k + 1)
           setFormOpen(true)
         }
@@ -170,6 +339,85 @@ function App() {
     }
   }, [openControlCenter, refresh])
 
+  useEffect(() => {
+    if (!preferencesReady) return
+
+    const currentWindow = getCurrentWindow()
+    let unlistenMoved: (() => void) | undefined
+    let unlistenResized: (() => void) | undefined
+    let cancelled = false
+
+    const restoreAndTrackWindow = async () => {
+      let resolvedGeometry = windowGeometry
+
+    if (!resolvedGeometry) {
+      const [position, size] = await Promise.all([
+        currentWindow.outerPosition().catch(() => null),
+        currentWindow.innerSize().catch(() => null),
+      ])
+      if (position && size) {
+        resolvedGeometry = {
+          x: Math.round(position.x),
+          y: Math.round(position.y),
+          width: Math.round(size.width),
+          height: Math.max(Math.round(size.height), MIN_WINDOW_HEIGHT),
+        }
+      }
+    } else {
+      resolvedGeometry = {
+        ...resolvedGeometry,
+        height: Math.max(resolvedGeometry.height, MIN_WINDOW_HEIGHT),
+      }
+    }
+
+    if (resolvedGeometry) {
+      await currentWindow
+        .setPosition(new PhysicalPosition(resolvedGeometry.x, resolvedGeometry.y))
+        .catch(() => undefined)
+      await currentWindow
+        .setSize(new PhysicalSize(resolvedGeometry.width, resolvedGeometry.height))
+        .catch(() => undefined)
+      setWindowGeometry(resolvedGeometry)
+    }
+
+      unlistenMoved = await currentWindow.onMoved(async ({ payload }) => {
+        if (cancelled) return
+        setWindowGeometry((current) => {
+          const next = {
+            x: Math.round(payload.x),
+            y: Math.round(payload.y),
+            width: current?.width ?? resolvedGeometry?.width ?? 1200,
+            height: current?.height ?? resolvedGeometry?.height ?? MIN_WINDOW_HEIGHT,
+          }
+          return sameWindowGeometry(current, next) ? current : next
+        })
+      })
+
+      unlistenResized = await currentWindow.onResized(async ({ payload }) => {
+        if (cancelled) return
+        setWindowGeometry((current) => {
+          const next = {
+            x: current?.x ?? resolvedGeometry?.x ?? 0,
+            y: current?.y ?? resolvedGeometry?.y ?? 0,
+            width: Math.round(payload.width),
+            height: Math.round(payload.height),
+          }
+          return sameWindowGeometry(current, next) ? current : next
+        })
+      })
+
+      await openControlCenter()
+    }
+
+    void restoreAndTrackWindow()
+
+    return () => {
+      cancelled = true
+      unlistenMoved?.()
+      unlistenResized?.()
+    }
+  }, [openControlCenter, preferencesReady])
+
   const handleSelect = useCallback((job: JobListEntry) => {
     setSelectedPlistPath(job.plist_path)
     setDetailOpen(true)
@@ -177,10 +425,35 @@ function App() {
 
   const handleEdit = useCallback((job: LaunchdJob) => {
     setEditingJob(job)
+    setJobFormDraft(createJobFormDraftFromJob(job))
     setFormKey((k) => k + 1)
     setFormOpen(true)
     setDetailOpen(false)
   }, [])
+
+  const handleRepair = useCallback(
+    (job: LaunchdJob, diagnosis: ServiceDiagnosis | null) => {
+      setEditingJob(job)
+      setJobFormDraft(
+        createRepairJobFormDraftFromJob(job, diagnosis?.suggested_metadata ?? null)
+      )
+      setFormKey((k) => k + 1)
+      setFormOpen(true)
+      setDetailOpen(false)
+    },
+    []
+  )
+
+  const handleEditFromList = useCallback(async (job: JobListEntry) => {
+    if (job.source !== "UserAgent") return
+    setActionError(null)
+    try {
+      const detail = await getJobDetail(job.plist_path)
+      handleEdit(detail)
+    } catch (e) {
+      setActionError(String(e))
+    }
+  }, [handleEdit])
 
   const handleSave = useCallback(
     async (config: PlistConfig, plistPath?: string) => {
@@ -189,6 +462,7 @@ function App() {
       } else {
         await createJob(config.label, config)
       }
+      setJobFormDraft(null)
       await refresh()
     },
     [refresh]
@@ -203,6 +477,72 @@ function App() {
   const runningCount = jobs.filter((job) => job.status === "Running").length
   const loadedCount = jobs.filter((job) => job.status === "Loaded").length
   const userAgentCount = jobs.filter((job) => job.source === "UserAgent").length
+  const groupSummaries = useMemo(() => {
+    const grouped = new Map<
+      string,
+      {
+        group: string
+        total: number
+        running: number
+        attention: number
+        logCoverage: number
+        mutable: number
+      }
+    >()
+    for (const job of jobs) {
+      const group = job.metadata.group ?? "Ungrouped"
+      const current =
+        grouped.get(group) ?? { group, total: 0, running: 0, attention: 0, logCoverage: 0, mutable: 0 }
+      current.total += 1
+      if (job.status === "Running") current.running += 1
+      if (deriveHealthText(job) === "Attention") {
+        current.attention += 1
+      }
+      if (job.log_paths.stdout || job.log_paths.stderr) current.logCoverage += 1
+      if (job.source === "UserAgent") current.mutable += 1
+      grouped.set(group, current)
+    }
+    return [...grouped.values()].sort((a, b) => a.group.localeCompare(b.group))
+  }, [jobs])
+  const groupOptions = useMemo(
+    () => groupSummaries.map((summary) => summary.group),
+    [groupSummaries]
+  )
+  const handleBulkGroupAction = useCallback(
+    async (group: string, action: "start" | "stop" | "restart" | "kickstart") => {
+      const targets = jobs.filter(
+        (job) => job.source === "UserAgent" && (job.metadata.group ?? "Ungrouped") === group
+      )
+      if (targets.length === 0) {
+        return
+      }
+      const confirmation = window.confirm(
+        `${bulkActionLabels[action]} ${targets.length} user agent${targets.length === 1 ? "" : "s"} in ${group}?`
+      )
+      if (!confirmation) {
+        return
+      }
+
+      setActionError(null)
+      try {
+        for (const target of targets) {
+          if (action === "start") {
+            await startJob(target.plist_path)
+          } else if (action === "stop") {
+            await stopJob(target.plist_path)
+          } else if (action === "restart") {
+            await restartJob(target.plist_path)
+          } else {
+            await kickstartJob(target.label, target.plist_path)
+          }
+        }
+        await refresh()
+      } catch (e) {
+        setActionError(String(e))
+      }
+    },
+    [jobs, refresh]
+  )
 
   const modeCard = modeCards.find((item) => item.id === agentMode) ?? modeCards[1]
 
@@ -219,19 +559,19 @@ function App() {
                   Menu bar
                 </Badge>
                 <Badge variant="outline" className="border-white/10 text-slate-300">
-                  launchd control surface
+                  macOS services
                 </Badge>
                 <ModeBadge mode={agentMode} />
               </div>
 
               <div>
                 <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
-                  Launch Control
+                  Daemonic
                 </h1>
                 <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-300">
-                  A tray-first macOS control center for launchd jobs with agent-driven
-                  workflows, local reasoning hooks, and a deterministic launchctl
-                  executor under the hood.
+                  Daemonic — Master Your macOS Services. A tray-first macOS control
+                  center for launchd jobs with agent-driven workflows, local reasoning
+                  hooks, and a deterministic launchctl executor under the hood.
                 </p>
               </div>
             </div>
@@ -259,6 +599,7 @@ function App() {
                 className="bg-emerald-500 text-slate-950 hover:bg-emerald-400"
                 onClick={() => {
                   setEditingJob(null)
+                  setJobFormDraft(createEmptyJobFormDraft())
                   setFormKey((k) => k + 1)
                   setFormOpen(true)
                 }}
@@ -347,8 +688,8 @@ function App() {
             </div>
           )}
 
-          <section className="grid flex-1 gap-4 xl:grid-cols-[minmax(0,1.75fr)_minmax(320px,0.95fr)]">
-            <div className="overflow-hidden rounded-3xl border border-white/10 bg-slate-950/70 shadow-2xl shadow-black/30 backdrop-blur-xl">
+          <section className="grid flex-1 gap-4 2xl:grid-cols-[minmax(0,1.75fr)_minmax(320px,0.95fr)]">
+            <div className="min-w-0 overflow-hidden rounded-3xl border border-white/10 bg-slate-950/70 shadow-2xl shadow-black/30 backdrop-blur-xl">
               <div className="border-b border-white/10 px-5 py-4">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                   <div>
@@ -359,20 +700,138 @@ function App() {
                       Launchd jobs and agents
                     </h2>
                   </div>
-                  <SearchBar
-                    search={search}
-                    onSearchChange={setSearch}
-                    sourceFilter={sourceFilter}
-                    onSourceFilterChange={setSourceFilter}
+                <SearchBar
+                  search={search}
+                  onSearchChange={setSearch}
+                  sourceFilter={sourceFilter}
+                  onSourceFilterChange={setSourceFilter}
+                  groupFilter={groupFilter}
+                  onGroupFilterChange={setGroupFilter}
+                  groupOptions={groupOptions}
                   />
                 </div>
+
+                {groupSummaries.length > 0 && (
+                  <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                    {groupSummaries.map((summary) => (
+                      <div
+                        key={summary.group}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() =>
+                          setGroupFilter(groupFilter === summary.group ? "All" : summary.group)
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault()
+                            setGroupFilter(
+                              groupFilter === summary.group ? "All" : summary.group
+                            )
+                          }
+                        }}
+                        className={[
+                          "rounded-2xl border p-3 text-left transition",
+                          groupFilter === summary.group
+                            ? "border-emerald-400/50 bg-emerald-400/10"
+                            : "border-white/10 bg-white/5 hover:bg-white/10",
+                        ].join(" ")}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-medium text-white">
+                              {summary.group}
+                            </div>
+                            <div className="mt-1 text-xs text-slate-400">
+                              {summary.total} services
+                            </div>
+                          </div>
+                          {summary.attention > 0 && (
+                            <Badge className="border-rose-400/30 bg-rose-400/10 text-rose-100 hover:bg-rose-400/10">
+                              {summary.attention} attention
+                            </Badge>
+                          )}
+                        </div>
+                        <div className="mt-3 grid grid-cols-3 gap-2 text-xs text-slate-300">
+                          <div>
+                            <div className="font-medium text-white">{summary.running}</div>
+                            <div>Running</div>
+                          </div>
+                          <div>
+                            <div className="font-medium text-white">{summary.logCoverage}</div>
+                            <div>Logged</div>
+                          </div>
+                          <div>
+                            <div className="font-medium text-white">
+                              {Math.round((summary.logCoverage / summary.total) * 100)}%
+                            </div>
+                            <div>Coverage</div>
+                          </div>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 border-white/10 bg-white/5 text-xs text-slate-100 hover:bg-white/10"
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              void handleBulkGroupAction(summary.group, "kickstart")
+                            }}
+                            disabled={summary.mutable === 0}
+                          >
+                            Test all
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 border-white/10 bg-white/5 text-xs text-slate-100 hover:bg-white/10"
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              void handleBulkGroupAction(summary.group, "start")
+                            }}
+                            disabled={summary.mutable === 0}
+                          >
+                            Start all
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 border-white/10 bg-white/5 text-xs text-slate-100 hover:bg-white/10"
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              void handleBulkGroupAction(summary.group, "stop")
+                            }}
+                            disabled={summary.mutable === 0}
+                          >
+                            Stop all
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 border-white/10 bg-white/5 text-xs text-slate-100 hover:bg-white/10"
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              void handleBulkGroupAction(summary.group, "restart")
+                            }}
+                            disabled={summary.mutable === 0}
+                          >
+                            Restart all
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 <div className="mt-4 grid gap-2 md:grid-cols-3">
                   {modeCards.map((mode) => (
                     <button
-                      key={mode.id}
-                      type="button"
-                      onClick={() => setAgentMode(mode.id)}
+                    key={mode.id}
+                    type="button"
+                    onClick={() => setAgentMode(mode.id)}
                       className={[
                         "rounded-2xl border p-3 text-left transition",
                         agentMode === mode.id
@@ -400,6 +859,7 @@ function App() {
                   onStop={(job) => handleAction(() => stopJob(job.plist_path))}
                   onRestart={(job) => handleAction(() => restartJob(job.plist_path))}
                   onKickstart={(job) => handleAction(() => kickstartJob(job.label, job.plist_path))}
+                  onEdit={(job) => void handleEditFromList(job)}
                   onDelete={(job) => setDeleteTarget(job)}
                   onSelect={handleSelect}
                   onRevealInFinder={(job) => revealInFinder(job.plist_path)}
@@ -548,6 +1008,7 @@ function App() {
           open={detailOpen}
           onClose={() => setDetailOpen(false)}
           onEdit={handleEdit}
+          onRepair={handleRepair}
         />
 
         <JobForm
@@ -559,6 +1020,8 @@ function App() {
           }}
           onSave={handleSave}
           editingJob={editingJob}
+          draft={jobFormDraft}
+          onDraftChange={setJobFormDraft}
         />
 
         <Dialog

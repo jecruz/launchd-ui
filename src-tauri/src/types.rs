@@ -25,9 +25,11 @@ pub struct JobListEntry {
     pub source: JobSource,
     pub status: JobStatus,
     pub last_run_at: Option<String>,
+    pub metadata: LaunchControlMetadata,
+    pub log_paths: LogPaths,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CalendarInterval {
     pub minute: Option<u32>,
     pub hour: Option<u32>,
@@ -36,7 +38,7 @@ pub struct CalendarInterval {
     pub month: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlistConfig {
     pub label: String,
     pub program: Option<String>,
@@ -51,7 +53,32 @@ pub struct PlistConfig {
     pub environment_variables: Option<HashMap<String, String>>,
     pub disabled: Option<bool>,
     pub wake_system: Option<bool>,
+    pub metadata: LaunchControlMetadata,
     pub raw_xml: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct LaunchControlMetadata {
+    pub group: Option<String>,
+    pub tags: Vec<String>,
+    pub managed_by: Option<String>,
+    pub description: Option<String>,
+    pub environment: Option<String>,
+    pub health_check_url: Option<String>,
+    pub health_check_command: Option<String>,
+    pub ports: Vec<u16>,
+    pub template: Option<String>,
+    pub migration_hint: Option<String>,
+    pub health_status: Option<String>,
+    pub health_detail: Option<String>,
+    pub last_health_check_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct LogPaths {
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +91,25 @@ pub struct LaunchdJob {
     pub last_exit_code: Option<i32>,
     pub plist: PlistConfig,
     pub last_run_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceRepairSuggestion {
+    pub title: String,
+    pub detail: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceDiagnosis {
+    pub summary: String,
+    pub likely_causes: Vec<String>,
+    pub suggestions: Vec<ServiceRepairSuggestion>,
+    pub stderr_excerpt: Option<String>,
+    pub stdout_excerpt: Option<String>,
+    pub health_status: Option<String>,
+    pub health_detail: Option<String>,
+    pub suggested_metadata: Option<LaunchControlMetadata>,
 }
 
 #[cfg(test)]
@@ -97,6 +143,8 @@ mod tests {
             source: JobSource::UserAgent,
             status: JobStatus::Running,
             last_run_at: None,
+            metadata: LaunchControlMetadata::default(),
+            log_paths: LogPaths::default(),
         };
         let json = serde_json::to_string(&entry).unwrap();
         let deserialized: JobListEntry = serde_json::from_str(&json).unwrap();

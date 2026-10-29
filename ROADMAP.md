@@ -1,4 +1,4 @@
-# FUBAR Roadmap: launchd-ui
+# FUBAR Roadmap: Daemonic
 
 ## Milestone 1: Lock Down Approved Action Safety
 
@@ -44,7 +44,7 @@ Success criterion: user can send a minimal local test prompt and see success or 
 
 ## Milestone 4: Update Project Documentation
 
-### Task 4.1: Update README for tray-first agent-driven Launch Control — DONE
+### Task 4.1: Update README for tray-first agent-driven Daemonic — DONE
 
 Success criterion: README accurately describes menu bar behavior, local runtime adapters, approval-gated actions, and safety constraints.
 

@@ -1,6 +1,7 @@
 import { useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { CopyableCodeBlock, CopyableInlineText } from "@/components/CopyableBlock"
 import { useLogs } from "@/hooks/useLogs"
 import { clearLogFile, openLogInEditor } from "@/lib/invoke"
 import { ExternalLink, RefreshCw, Trash2 } from "lucide-react"
@@ -40,9 +41,11 @@ export function LogViewer({ logPath, tailLines = 200 }: LogViewerProps) {
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 min-w-0">
-          <span className="text-xs text-muted-foreground font-mono truncate">
-            {logPath}
-          </span>
+          <CopyableInlineText
+            text={logPath}
+            copyLabel="Copy log path"
+            className="text-xs text-muted-foreground font-mono"
+          />
           {modifiedAt && (
             <span className="text-xs text-muted-foreground shrink-0">
               ({formatTime(modifiedAt)})
@@ -83,11 +86,17 @@ export function LogViewer({ logPath, tailLines = 200 }: LogViewerProps) {
       {error ? (
         <div className="text-sm text-destructive">{error}</div>
       ) : (
-        <ScrollArea className="h-64 rounded-md border bg-muted/30">
-          <pre className="p-3 text-xs font-mono whitespace-pre-wrap break-all">
-            {content || "(empty)"}
-          </pre>
-        </ScrollArea>
+        <CopyableCodeBlock
+          text={content || "(empty)"}
+          copyLabel="Copy log text"
+          className="h-64"
+        >
+          <ScrollArea className="h-64 rounded-md border bg-muted/30">
+            <pre className="p-3 text-xs font-mono whitespace-pre-wrap break-all">
+              {content || "(empty)"}
+            </pre>
+          </ScrollArea>
+        </CopyableCodeBlock>
       )}
     </div>
   )

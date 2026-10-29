@@ -1,5 +1,5 @@
 use crate::error::AppError;
-use crate::types::{CalendarInterval, JobSource, PlistConfig};
+use crate::types::{CalendarInterval, JobSource, LaunchControlMetadata, PlistConfig};
 use plist::Value;
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -117,6 +117,39 @@ fn extract_env_vars(dict: &plist::Dictionary) -> Option<HashMap<String, String>>
         })
 }
 
+fn extract_u16_array(dict: &plist::Dictionary, key: &str) -> Vec<u16> {
+    dict.get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_unsigned_integer().map(|n| n as u16))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn extract_launch_control_metadata(dict: &plist::Dictionary) -> LaunchControlMetadata {
+    let Some(metadata) = dict.get("LaunchControl").and_then(|v| v.as_dictionary()) else {
+        return LaunchControlMetadata::default();
+    };
+
+    LaunchControlMetadata {
+        group: extract_string(metadata, "Group"),
+        tags: extract_string_array(metadata, "Tags").unwrap_or_default(),
+        managed_by: extract_string(metadata, "ManagedBy"),
+        description: extract_string(metadata, "Description"),
+        environment: extract_string(metadata, "Environment"),
+        health_check_url: extract_string(metadata, "HealthCheckURL"),
+        health_check_command: extract_string(metadata, "HealthCheckCommand"),
+        ports: extract_u16_array(metadata, "Ports"),
+        template: extract_string(metadata, "Template"),
+        migration_hint: extract_string(metadata, "MigrationHint"),
+        health_status: extract_string(metadata, "HealthStatus"),
+        health_detail: extract_string(metadata, "HealthDetail"),
+        last_health_check_at: extract_string(metadata, "LastHealthCheckAt"),
+    }
+}
+
 pub fn parse_plist(path: &str) -> Result<PlistConfig, AppError> {
     let value = Value::from_file(path).map_err(|e| AppError::Plist(format!("{path}: {e}")))?;
     let dict = value
@@ -147,6 +180,7 @@ pub fn parse_plist(path: &str) -> Result<PlistConfig, AppError> {
         environment_variables: extract_env_vars(dict),
         disabled: extract_bool(dict, "Disabled"),
         wake_system: extract_bool(dict, "WakeSystem"),
+        metadata: extract_launch_control_metadata(dict),
         raw_xml,
     })
 }
@@ -261,6 +295,101 @@ pub fn write_plist(path: &str, config: &PlistConfig) -> Result<(), AppError> {
         dict.insert("WakeSystem".to_string(), Value::Boolean(wake_system));
     }
 
+    if config.metadata.group.is_some()
+        || !config.metadata.tags.is_empty()
+        || config.metadata.managed_by.is_some()
+        || config.metadata.description.is_some()
+        || config.metadata.environment.is_some()
+        || config.metadata.health_check_url.is_some()
+        || config.metadata.health_check_command.is_some()
+        || !config.metadata.ports.is_empty()
+        || config.metadata.template.is_some()
+        || config.metadata.migration_hint.is_some()
+    {
+        let mut metadata = plist::Dictionary::new();
+        if let Some(group) = config.metadata.group.as_ref() {
+            metadata.insert("Group".to_string(), Value::String(group.clone()));
+        }
+        if !config.metadata.tags.is_empty() {
+            metadata.insert(
+                "Tags".to_string(),
+                Value::Array(
+                    config
+                        .metadata
+                        .tags
+                        .iter()
+                        .map(|tag| Value::String(tag.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(managed_by) = config.metadata.managed_by.as_ref() {
+            metadata.insert("ManagedBy".to_string(), Value::String(managed_by.clone()));
+        }
+        if let Some(description) = config.metadata.description.as_ref() {
+            metadata.insert(
+                "Description".to_string(),
+                Value::String(description.clone()),
+            );
+        }
+        if let Some(environment) = config.metadata.environment.as_ref() {
+            metadata.insert(
+                "Environment".to_string(),
+                Value::String(environment.clone()),
+            );
+        }
+        if let Some(url) = config.metadata.health_check_url.as_ref() {
+            metadata.insert("HealthCheckURL".to_string(), Value::String(url.clone()));
+        }
+        if let Some(command) = config.metadata.health_check_command.as_ref() {
+            metadata.insert(
+                "HealthCheckCommand".to_string(),
+                Value::String(command.clone()),
+            );
+        }
+        if !config.metadata.ports.is_empty() {
+            metadata.insert(
+                "Ports".to_string(),
+                Value::Array(
+                    config
+                        .metadata
+                        .ports
+                        .iter()
+                        .map(|port| Value::Integer((*port as u64).into()))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(template) = config.metadata.template.as_ref() {
+            metadata.insert("Template".to_string(), Value::String(template.clone()));
+        }
+        if let Some(migration_hint) = config.metadata.migration_hint.as_ref() {
+            metadata.insert(
+                "MigrationHint".to_string(),
+                Value::String(migration_hint.clone()),
+            );
+        }
+        if let Some(health_status) = config.metadata.health_status.as_ref() {
+            metadata.insert(
+                "HealthStatus".to_string(),
+                Value::String(health_status.clone()),
+            );
+        }
+        if let Some(health_detail) = config.metadata.health_detail.as_ref() {
+            metadata.insert(
+                "HealthDetail".to_string(),
+                Value::String(health_detail.clone()),
+            );
+        }
+        if let Some(last_health_check_at) = config.metadata.last_health_check_at.as_ref() {
+            metadata.insert(
+                "LastHealthCheckAt".to_string(),
+                Value::String(last_health_check_at.clone()),
+            );
+        }
+        dict.insert("LaunchControl".to_string(), Value::Dictionary(metadata));
+    }
+
     let value = Value::Dictionary(dict);
     value
         .to_file_xml(path)
@@ -362,6 +491,21 @@ mod tests {
             environment_variables: Some(HashMap::from([("FOO".to_string(), "bar".to_string())])),
             disabled: None,
             wake_system: None,
+            metadata: LaunchControlMetadata {
+                group: Some("CAISS System".to_string()),
+                tags: vec!["caiss".to_string(), "roundtrip".to_string()],
+                managed_by: Some("Daemonic".to_string()),
+                description: Some("Roundtrip test service".to_string()),
+                environment: Some("test".to_string()),
+                health_check_url: Some("http://127.0.0.1:8001/health".to_string()),
+                health_check_command: Some("curl -fsS http://127.0.0.1:8001/health".to_string()),
+                ports: vec![8001, 8002],
+                template: Some("api".to_string()),
+                migration_hint: Some("docker-compose".to_string()),
+                health_status: Some("healthy".to_string()),
+                health_detail: Some("ok".to_string()),
+                last_health_check_at: Some("1710000000000".to_string()),
+            },
             raw_xml: String::new(),
         };
 
@@ -378,9 +522,67 @@ mod tests {
         assert_eq!(parsed.start_interval, Some(300));
         assert_eq!(parsed.standard_out_path, Some("/tmp/test.log".to_string()));
         assert_eq!(parsed.working_directory, Some("/tmp".to_string()));
+        assert_eq!(parsed.metadata.group, Some("CAISS System".to_string()));
+        assert_eq!(
+            parsed.metadata.tags,
+            vec!["caiss".to_string(), "roundtrip".to_string()]
+        );
+        assert_eq!(parsed.metadata.ports, vec![8001, 8002]);
         assert_eq!(
             parsed.environment_variables,
             Some(HashMap::from([("FOO".to_string(), "bar".to_string())]))
+        );
+    }
+
+    #[test]
+    fn test_write_plist_with_health_metadata_only() {
+        let config = PlistConfig {
+            label: "com.example.health".to_string(),
+            program: Some("/usr/bin/echo".to_string()),
+            program_arguments: Some(vec!["/usr/bin/echo".to_string(), "health".to_string()]),
+            run_at_load: Some(true),
+            keep_alive: Some(false),
+            start_interval: None,
+            start_calendar_interval: None,
+            standard_out_path: None,
+            standard_error_path: None,
+            working_directory: None,
+            environment_variables: None,
+            disabled: None,
+            wake_system: None,
+            metadata: LaunchControlMetadata {
+                group: None,
+                tags: Vec::new(),
+                managed_by: None,
+                description: None,
+                environment: None,
+                health_check_url: Some("http://127.0.0.1:3002/".to_string()),
+                health_check_command: None,
+                ports: vec![3002],
+                template: Some("web".to_string()),
+                migration_hint: Some("docker-compose".to_string()),
+                health_status: None,
+                health_detail: None,
+                last_health_check_at: None,
+            },
+            raw_xml: String::new(),
+        };
+
+        let file = NamedTempFile::with_suffix(".plist").unwrap();
+        let path = file.path().to_str().unwrap();
+
+        write_plist(path, &config).unwrap();
+        let parsed = parse_plist(path).unwrap();
+
+        assert_eq!(
+            parsed.metadata.health_check_url,
+            Some("http://127.0.0.1:3002/".to_string())
+        );
+        assert_eq!(parsed.metadata.ports, vec![3002]);
+        assert_eq!(parsed.metadata.template, Some("web".to_string()));
+        assert_eq!(
+            parsed.metadata.migration_hint,
+            Some("docker-compose".to_string())
         );
     }
 

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core"
 import type {
+  AppPreferences,
   AgentPromptRequest,
   AgentRuntimeResult,
   AgentRuntimeSettings,
@@ -9,6 +10,8 @@ import type {
   JobListEntry,
   LaunchdJob,
   PlistConfig,
+  ServiceDiagnosis,
+  ServiceHealthCheckResult,
 } from "@/types"
 
 export const listJobs = () => invoke<JobListEntry[]>("list_jobs")
@@ -76,3 +79,15 @@ export const runAgentPrompt = (request: AgentPromptRequest) =>
 
 export const applyApprovedAgentAction = (request: ApprovedAgentActionRequest) =>
   invoke<ApprovedAgentActionResult>("apply_approved_agent_action", { request })
+
+export const checkServiceHealth = (plistPath: string) =>
+  invoke<ServiceHealthCheckResult>("check_service_health", { plistPath })
+
+export const diagnoseService = (plistPath: string) =>
+  invoke<ServiceDiagnosis>("diagnose_service", { plistPath })
+
+export const getAppPreferences = () =>
+  invoke<AppPreferences>("get_app_preferences")
+
+export const saveAppPreferences = (preferences: AppPreferences) =>
+  invoke<AppPreferences>("save_app_preferences", { preferences })

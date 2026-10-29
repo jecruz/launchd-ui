@@ -1,0 +1,284 @@
+import { render, screen, waitFor, within } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { JobDetail } from "./JobDetail"
+import type { LaunchdJob } from "@/types"
+import { resetFakeHandlers, setFakeHandler } from "@/test-utils/tauri-mock"
+
+const baseJob: LaunchdJob = {
+  label: "ai.cybergrunt.uptime-kuma",
+  plist_path: "/Users/test/Library/LaunchAgents/ai.cybergrunt.uptime-kuma.plist",
+  source: "UserAgent",
+  status: "Running",
+  pid: 1234,
+  last_exit_code: 1,
+  last_run_at: String(Date.now()),
+  plist: {
+    label: "ai.cybergrunt.uptime-kuma",
+    program: null,
+    program_arguments: [
+      "/opt/homebrew/bin/node",
+      "/opt/homebrew/lib/node_modules/uptime-kuma/server/server.js",
+      "--port=3002",
+    ],
+    run_at_load: true,
+    keep_alive: true,
+    start_interval: null,
+    start_calendar_interval: null,
+    standard_out_path: null,
+    standard_error_path: null,
+    working_directory: null,
+    environment_variables: null,
+    disabled: null,
+    wake_system: null,
+    metadata: {
+      group: "CAISS System",
+      tags: ["uptime-kuma", "monitoring"],
+      managed_by: "Daemonic",
+      description: "Uptime Kuma service",
+      environment: "local",
+      health_check_url: "http://127.0.0.1:3001/",
+      health_check_command: null,
+      ports: [3001],
+      template: "web",
+      migration_hint: "docker-compose",
+      health_status: "unhealthy",
+      health_detail: "GET http://127.0.0.1:3001/ failed",
+      last_health_check_at: String(Date.now()),
+    },
+    raw_xml: "",
+  },
+}
+
+describe("JobDetail", () => {
+  afterEach(() => {
+    resetFakeHandlers()
+  })
+
+  it("refreshes the diagnosis after a successful health check", async () => {
+    const user = userEvent.setup()
+    const getJobDetail = vi.fn()
+    const diagnoseService = vi.fn()
+
+    setFakeHandler("get_job_detail", () => {
+      const count = getJobDetail.mock.calls.length
+      getJobDetail()
+      return {
+        ...baseJob,
+        plist: {
+          ...baseJob.plist,
+          metadata: {
+            ...baseJob.plist.metadata,
+            health_status: count === 0 ? "unhealthy" : "healthy",
+            health_detail:
+              count === 0
+                ? "GET http://127.0.0.1:3001/ failed"
+                : "GET http://127.0.0.1:3002/ succeeded: Found. Redirecting to /dashboard",
+            health_check_url: count === 0 ? "http://127.0.0.1:3001/" : "http://127.0.0.1:3002/",
+            ports: count === 0 ? [3001] : [3002],
+          },
+        },
+      }
+    })
+
+    setFakeHandler("diagnose_service", () => {
+      diagnoseService()
+      return {
+        summary: "Uptime Kuma is likely failing because its health/port metadata is incomplete.",
+        likely_causes: ["The saved health URL points at the wrong port."],
+        suggestions: [],
+        stderr_excerpt: null,
+        stdout_excerpt: null,
+        health_status: "unhealthy",
+        health_detail: "GET http://127.0.0.1:3001/ failed",
+        suggested_metadata: null,
+      }
+    })
+
+    setFakeHandler("check_service_health", () => ({
+      status: "healthy",
+      detail: "GET http://127.0.0.1:3002/ succeeded: Found. Redirecting to /dashboard",
+      checked_at: String(Date.now()),
+    }))
+
+    render(
+      <JobDetail
+        plistPath={baseJob.plist_path}
+        open
+        onClose={vi.fn()}
+        onEdit={vi.fn()}
+        onRepair={vi.fn()}
+      />
+    )
+
+    await screen.findByText("Uptime Kuma is likely failing because its health/port metadata is incomplete.")
+    await user.click(screen.getByRole("button", { name: "Check Health" }))
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "The service is healthy. GET http://127.0.0.1:3002/ succeeded: Found. Redirecting to /dashboard"
+        )
+      ).toBeInTheDocument()
+    )
+    expect(screen.getByRole("heading", { name: "Health" })).toBeInTheDocument()
+    expect(screen.queryByRole("heading", { name: "Repair" })).not.toBeInTheDocument()
+  })
+
+  it("shows a health empty state when no explicit health check is configured", async () => {
+    const onRepair = vi.fn()
+    setFakeHandler("get_job_detail", () => ({
+      ...baseJob,
+      last_exit_code: 0,
+      plist: {
+        ...baseJob.plist,
+        metadata: {
+          ...baseJob.plist.metadata,
+          health_status: "unknown",
+          health_detail: "No explicit health check configured",
+          health_check_url: null,
+          health_check_command: null,
+        },
+      },
+    }))
+
+    setFakeHandler("diagnose_service", () => ({
+      summary: "The service health is unknown; no explicit health check is configured yet.",
+      likely_causes: [],
+      suggestions: [],
+      stderr_excerpt: null,
+      stdout_excerpt: null,
+      health_status: "unknown",
+      health_detail: "No explicit health check configured",
+      suggested_metadata: null,
+    }))
+
+    render(
+      <JobDetail
+        plistPath={baseJob.plist_path}
+        open
+        onClose={vi.fn()}
+        onEdit={vi.fn()}
+        onRepair={onRepair}
+      />
+    )
+
+    expect(await screen.findByRole("heading", { name: "Health" })).toBeInTheDocument()
+    expect(screen.getByText("No health check")).toBeInTheDocument()
+    expect(screen.getByText("No explicit health check is configured.")).toBeInTheDocument()
+    expect(
+      screen.getByText("Add a Health Check URL or command to turn this into a probe-backed status.")
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText("The service health is unknown; no explicit health check is configured yet.")
+    ).not.toBeInTheDocument()
+
+    expect(screen.queryByRole("button", { name: "Repair" })).not.toBeInTheDocument()
+    expect(onRepair).not.toHaveBeenCalled()
+  })
+
+  it("sorts repair causes and suggestions in the detail panel", async () => {
+    setFakeHandler("get_job_detail", () => ({
+      ...baseJob,
+      plist: {
+        ...baseJob.plist,
+        metadata: {
+          ...baseJob.plist.metadata,
+          health_status: "unhealthy",
+          health_detail: "GET http://127.0.0.1:3001/ failed",
+        },
+      },
+    }))
+
+    setFakeHandler("diagnose_service", () => ({
+      summary: "The service is unhealthy.",
+      likely_causes: ["Zeta cause", "Alpha cause"],
+      suggestions: [
+        { title: "Reset plist metadata", detail: "Third option", kind: "plist" },
+        { title: "Add service template", detail: "First option", kind: "template" },
+        { title: "Add health metadata", detail: "Second option", kind: "metadata" },
+      ],
+      stderr_excerpt: null,
+      stdout_excerpt: null,
+      health_status: "unhealthy",
+      health_detail: "GET http://127.0.0.1:3001/ failed",
+      suggested_metadata: null,
+    }))
+
+    render(
+      <JobDetail
+        plistPath={baseJob.plist_path}
+        open
+        onClose={vi.fn()}
+        onEdit={vi.fn()}
+        onRepair={vi.fn()}
+      />
+    )
+
+    const repairSection = await screen.findByRole("heading", { name: "Repair" })
+    const repairContainer = repairSection.closest("section") ?? repairSection.parentElement
+    expect(repairContainer).toBeTruthy()
+
+    const likelyCausesSection = within(repairContainer as HTMLElement).getByText("Likely causes")
+      .closest("div") as HTMLElement
+    expect(within(likelyCausesSection).getAllByRole("listitem")[0]).toHaveTextContent("Alpha cause")
+    expect(within(likelyCausesSection).getAllByRole("listitem")[1]).toHaveTextContent("Zeta cause")
+
+    const suggestionsSection = within(repairContainer as HTMLElement).getByText("Suggested fixes")
+      .closest("div") as HTMLElement
+    const suggestionItems = within(suggestionsSection).getAllByRole("listitem")
+    expect(suggestionItems[0]).toHaveTextContent("Add health metadata")
+    expect(suggestionItems[1]).toHaveTextContent("Add service template")
+    expect(suggestionItems[2]).toHaveTextContent("Reset plist metadata")
+  })
+
+  it("copies the label from the detail header", async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText,
+      },
+    })
+
+    setFakeHandler("get_job_detail", () => ({
+      ...baseJob,
+      plist: {
+        ...baseJob.plist,
+        metadata: {
+          ...baseJob.plist.metadata,
+          health_status: "healthy",
+          health_detail: "GET http://127.0.0.1:3002/ succeeded",
+          health_check_url: "http://127.0.0.1:3002/",
+          ports: [3002],
+        },
+      },
+    }))
+
+    setFakeHandler("diagnose_service", () => ({
+      summary: "The service is healthy.",
+      likely_causes: [],
+      suggestions: [],
+      stderr_excerpt: null,
+      stdout_excerpt: null,
+      health_status: "healthy",
+      health_detail: "GET http://127.0.0.1:3002/ succeeded",
+      suggested_metadata: null,
+    }))
+
+    render(
+      <JobDetail
+        plistPath={baseJob.plist_path}
+        open
+        onClose={vi.fn()}
+        onEdit={vi.fn()}
+        onRepair={vi.fn()}
+      />
+    )
+
+    await user.click(await screen.findByRole("button", { name: "Copy label ai.cybergrunt.uptime-kuma" }))
+
+    expect(writeText).toHaveBeenCalledWith("ai.cybergrunt.uptime-kuma")
+  })
+})
