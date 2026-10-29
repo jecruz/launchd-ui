@@ -258,3 +258,13 @@ describe("formatCalendarIntervals", () => {
     expect(result).toBe("Every Friday every hour at :30")
   })
 })
+
+it("matches Day or Weekday and recognizes Sunday as weekday 7", () => {
+  const day = new Date().getDate() === 15 ? 16 : 15
+  const interval = { minute: 0, hour: 9, day, weekday: 7, month: null }
+  const occurrences = getNextOccurrences(interval, 8)
+  expect(occurrences).toHaveLength(8)
+  expect(occurrences.some((date) => date.getDay() === 0 && date.getDate() !== day)).toBe(true)
+  expect(occurrences.every((date) => date.getDay() === 0 || date.getDate() === day)).toBe(true)
+  expect(formatCalendarIntervals([{ ...interval, day: null }])).toContain("Sunday")
+})

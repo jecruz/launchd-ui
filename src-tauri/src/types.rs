@@ -53,6 +53,7 @@ pub struct PlistConfig {
     pub environment_variables: Option<HashMap<String, String>>,
     pub disabled: Option<bool>,
     pub wake_system: Option<bool>,
+    #[serde(default)]
     pub metadata: LaunchControlMetadata,
     pub raw_xml: String,
 }

@@ -9,6 +9,15 @@ use crate::types::{
     ServiceRepairSuggestion,
 };
 use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::fs::OpenOptionsExt;
+
+/// Complete an explicit quit only after the frontend has flushed its pending state.
+#[tauri::command]
+pub fn finish_quit(app: tauri::AppHandle) {
+    crate::QUIT_APPROVED.store(true, std::sync::atomic::Ordering::SeqCst);
+    app.exit(0);
+}
 
 fn current_epoch_millis() -> String {
     let now = std::time::SystemTime::now();
@@ -19,36 +28,44 @@ fn current_epoch_millis() -> String {
     millis.to_string()
 }
 
-fn tail_file(path: &str, limit: usize) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(limit);
-    let excerpt = lines[start..].join("\n");
-    if excerpt.trim().is_empty() {
-        None
+fn read_tail(path: &str, limit: usize) -> Result<(String, Option<String>), AppError> {
+    const MAX_BYTES: u64 = 256 * 1024;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(AppError::Plist("Logs must be regular files.".into()));
+    }
+    let offset = metadata.len().saturating_sub(MAX_BYTES);
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES).read_to_end(&mut bytes)?;
+    let content = String::from_utf8_lossy(&bytes);
+    let content = if offset > 0 {
+        content
+            .split_once('\n')
+            .map(|(_, tail)| tail)
+            .unwrap_or(&content)
     } else {
-        Some(excerpt)
-    }
+        &content
+    };
+    let lines: Vec<_> = content.lines().collect();
+    let content = lines[lines.len().saturating_sub(limit.min(2000))..].join("\n");
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().to_string());
+    Ok((content, modified))
 }
 
-fn line_has_log_timestamp(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    let bytes = trimmed.as_bytes();
-    if bytes.len() < 10 {
-        return false;
-    }
-
-    bytes[0..4].iter().all(|byte| byte.is_ascii_digit())
-        && bytes[4] == b'-'
-        && bytes[5..7].iter().all(|byte| byte.is_ascii_digit())
-        && bytes[7] == b'-'
-        && bytes[8..10].iter().all(|byte| byte.is_ascii_digit())
-}
-
-fn excerpt_has_log_timestamp(excerpt: Option<&str>) -> bool {
-    excerpt
-        .map(|text| text.lines().any(line_has_log_timestamp))
-        .unwrap_or(false)
+fn tail_file(path: &str, limit: usize) -> Option<String> {
+    read_tail(path, limit)
+        .ok()
+        .map(|(content, _)| content)
+        .filter(|content| !content.trim().is_empty())
 }
 
 fn parse_program_port(program_arguments: Option<&Vec<String>>) -> Option<u16> {
@@ -237,9 +254,10 @@ fn approved_action_command(
 
 #[tauri::command]
 pub async fn list_jobs() -> Result<Vec<JobListEntry>, AppError> {
+    service_overlays::recover_pending()?;
     let plist_files = plist_util::scan_plist_files();
     let loaded = launchctl::list_loaded().unwrap_or_default();
-    let overlays = service_overlays::load_service_overrides().unwrap_or_default();
+    let overlays = service_overlays::load_service_overrides()?;
 
     let loaded_map: HashMap<String, &launchctl::LoadedService> =
         loaded.iter().map(|s| (s.label.clone(), s)).collect();
@@ -286,6 +304,7 @@ pub async fn list_jobs() -> Result<Vec<JobListEntry>, AppError> {
 
 #[tauri::command]
 pub async fn get_job_detail(plist_path: String) -> Result<LaunchdJob, AppError> {
+    service_overlays::recover_pending()?;
     if !std::path::Path::new(&plist_path).exists() {
         return Err(AppError::NotFound(plist_path));
     }
@@ -441,46 +460,27 @@ fn suggest_repair(
     let stdout_lower = stdout_excerpt.unwrap_or("").to_lowercase();
     let label_lower = job.label.to_lowercase();
     let metadata = &job.plist.metadata;
-    let log_excerpt_has_timestamps =
-        excerpt_has_log_timestamp(stderr_excerpt) || excerpt_has_log_timestamp(stdout_excerpt);
-    let stdout_has_gateway_markers = stdout_lower.contains("gateway running")
-        && (stdout_lower.contains("connected to telegram")
-            || stdout_lower.contains("telegram connected"));
-
-    if label_lower.contains("hermes.gateway") && stdout_has_gateway_markers {
-        let detail = stdout_excerpt
-            .map(|text| {
-                let compact = text
-                    .lines()
-                    .filter(|line| {
-                        let line_lower = line.to_lowercase();
-                        line_lower.contains("gateway running")
-                            || line_lower.contains("api server listening")
-                            || line_lower.contains("connected to telegram")
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                if compact.is_empty() {
-                    "Hermes Gateway is running normally.".to_string()
-                } else {
-                    format!("Hermes Gateway is running normally; {compact}")
-                }
-            })
-            .unwrap_or_else(|| "Hermes Gateway is running normally.".to_string());
-
-        return ServiceDiagnosis {
-            summary: "Hermes Gateway is running normally; recent warnings appear non-fatal."
-                .to_string(),
-            likely_causes: Vec::new(),
-            suggestions: Vec::new(),
-            stderr_excerpt: stderr_excerpt.map(ToOwned::to_owned),
-            stdout_excerpt: stdout_excerpt.map(ToOwned::to_owned),
-            health_status: Some("healthy".to_string()),
-            health_detail: Some(detail),
-            suggested_metadata: None,
-        };
+    let mut observed = metadata.clone();
+    let fresh = metadata
+        .last_health_check_at
+        .as_deref()
+        .and_then(|value| value.parse::<u128>().ok())
+        .is_some_and(|time| {
+            current_epoch_millis()
+                .parse::<u128>()
+                .is_ok_and(|now| time <= now && now - time <= 300_000)
+        });
+    if job.last_exit_code.is_some_and(|code| code != 0) {
+        observed.health_status = Some("unhealthy".into());
+        observed.health_detail = Some("The last process exit was nonzero.".into());
+    } else if !fresh
+        || (job.status != JobStatus::Running
+            && observed.health_status.as_deref() == Some("healthy"))
+    {
+        observed.health_status = Some("unknown".into());
+        observed.health_detail = Some("Health observation is missing, stale, or no longer backed by a running process; run a fresh probe.".into());
     }
-
+    let metadata = &observed;
     if job.last_exit_code.is_some() && job.last_exit_code != Some(0) {
         likely_causes.push(format!("The last exit code was {:?}", job.last_exit_code));
     }
@@ -555,33 +555,10 @@ fn suggest_repair(
         });
     }
 
-    if stderr_excerpt.is_some()
-        && !log_excerpt_has_timestamps
-        && metadata.health_status.as_deref() != Some("healthy")
-    {
-        let summary = if label_lower.contains("hermes.gateway") {
-            "Hermes Gateway log output has no timestamps, so the warning may be stale.".to_string()
-        } else {
-            "The log excerpt has no timestamps, so the warning may be stale and the service may already be healthy."
-                .to_string()
-        };
-
-        return ServiceDiagnosis {
-            summary,
-            likely_causes: Vec::new(),
-            suggestions: Vec::new(),
-            stderr_excerpt: stderr_excerpt.map(ToOwned::to_owned),
-            stdout_excerpt: stdout_excerpt.map(ToOwned::to_owned),
-            health_status: Some("unknown".to_string()),
-            health_detail: Some(
-                "Log excerpt has no timestamps; treat the warning as stale until a fresh probe or timestamped log confirms it."
-                    .to_string(),
-            ),
-            suggested_metadata: None,
-        };
-    }
-
-    let summary = if metadata.health_status.as_deref() == Some("healthy") {
+    let summary = if job.last_exit_code.is_some_and(|code| code != 0) {
+        "The service exited with a nonzero status; inspect its current configuration and logs."
+            .to_string()
+    } else if metadata.health_status.as_deref() == Some("healthy") {
         if let Some(detail) = metadata.health_detail.as_ref() {
             format!("The service is healthy. {detail}")
         } else {
@@ -741,8 +718,14 @@ pub async fn disable_job(label: String, plist_path: String) -> Result<(), AppErr
 pub async fn save_job(plist_path: String, config: PlistConfig) -> Result<(), AppError> {
     let agent = crate::user_agent::load(&plist_path, Some(&config.label))?;
     crate::user_agent::validate_log_parents(&config)?;
-    agent.write(&plist_util::serialize_plist(&config)?)?;
-    service_overlays::upsert_service_override(&agent.path(), &config.metadata)
+    plist_util::validate_config(&config)?;
+    service_overlays::transact_plist(
+        &agent.path(),
+        &config.label,
+        Some(&plist_util::serialize_plist(&config)?),
+        Some(&config.metadata),
+        false,
+    )
 }
 
 /// Create a new user agent with a single safe label and exclusive file creation.
@@ -756,8 +739,18 @@ pub async fn create_job(label: String, config: PlistConfig) -> Result<String, Ap
     }
     crate::user_agent::validate_log_parents(&config)?;
     let bytes = plist_util::serialize_plist(&config)?;
-    let path_str = crate::user_agent::create(&label, &bytes)?;
-    service_overlays::upsert_service_override(&path_str, &config.metadata)?;
+    plist_util::validate_config(&config)?;
+    let path_str = plist_util::get_user_agents_dir()
+        .join(format!("{label}.plist"))
+        .to_string_lossy()
+        .into_owned();
+    service_overlays::transact_plist(
+        &path_str,
+        &label,
+        Some(&bytes),
+        Some(&config.metadata),
+        true,
+    )?;
     Ok(path_str)
 }
 
@@ -766,21 +759,30 @@ pub async fn create_job(label: String, config: PlistConfig) -> Result<String, Ap
 pub async fn save_raw_plist(plist_path: String, xml: String) -> Result<(), AppError> {
     let agent = crate::user_agent::load(&plist_path, None)?;
     crate::user_agent::validate_xml_label(&xml, &agent.config.label)?;
-    crate::user_agent::validate_log_parents(&plist_util::parse_plist_bytes(xml.as_bytes())?)?;
-    agent.write(xml.as_bytes())
+    plist_util::validate_raw_schedule(xml.as_bytes())?;
+    let config = plist_util::parse_plist_bytes(xml.as_bytes())?;
+    crate::user_agent::validate_log_parents(&config)?;
+    plist_util::validate_config(&config)?;
+    service_overlays::transact_plist(
+        &agent.path(),
+        &config.label,
+        Some(xml.as_bytes()),
+        Some(&config.metadata),
+        false,
+    )
 }
 
 /// Delete only a validated user agent whose request label matches its plist.
 #[tauri::command]
 pub async fn delete_job(plist_path: String, label: String) -> Result<(), AppError> {
     let agent = crate::user_agent::load(&plist_path, Some(&label))?;
-    agent.ensure_current()?;
-    launchctl::bootout(&agent.path())?;
-    agent.ensure_current()?;
-    launchctl::disable(&label)?;
-    agent.remove()?;
-    service_overlays::remove_service_override(&agent.path())?;
-    Ok(())
+    let loaded = launchctl::list_loaded()?;
+    if loaded.iter().any(|service| service.label == label) {
+        agent.ensure_current()?;
+        launchctl::bootout(&agent.path())?;
+    }
+    service_overlays::transact_plist(&agent.path(), &label, None, None, false)
+        .map_err(|error| AppError::Plist(format!("Deletion failed: {error}. Files are recovered or recovery is pending; a previously loaded service may remain stopped.")))
 }
 
 #[derive(serde::Serialize)]
@@ -804,15 +806,10 @@ pub async fn check_service_health(plist_path: String) -> Result<HealthCheckResul
     .await
     .map_err(|_| AppError::AgentRuntime("Health probe worker failed.".into()))??;
     let checked_at = current_epoch_millis();
-    let mut updated_metadata = job.plist.metadata.clone();
-    updated_metadata.health_status = Some(status.clone());
-    updated_metadata.health_detail = Some(detail.clone());
-    updated_metadata.last_health_check_at = Some(checked_at.clone());
     if job.source == crate::types::JobSource::UserAgent {
         crate::user_agent::load(&plist_path, Some(&job.label))?;
     }
-    // Observations live in app-owned state; system launchd jobs themselves stay read-only.
-    service_overlays::upsert_service_override(&plist_path, &updated_metadata)?;
+    service_overlays::record_health(&plist_path, &status, &detail, &checked_at)?;
     Ok(HealthCheckResult {
         status,
         detail,
@@ -856,37 +853,7 @@ pub async fn read_log_file(
     path: String,
     tail_lines: Option<usize>,
 ) -> Result<LogFileResult, AppError> {
-    if !std::path::Path::new(&path).exists() {
-        return Err(AppError::NotFound(format!("log file not found: {path}")));
-    }
-
-    let metadata = std::fs::metadata(&path)?;
-    let modified_at = metadata
-        .modified()
-        .ok()
-        .and_then(|t| {
-            let duration = t.duration_since(std::time::UNIX_EPOCH).ok()?;
-            Some(duration.as_secs())
-        })
-        .map(|secs| {
-            // ISO 8601 timestamp in UTC (frontend will format to local)
-            let secs_i64 = secs as i64;
-            format!(
-                "{}",
-                secs_i64 * 1000 // milliseconds for JS Date
-            )
-        });
-
-    let content = std::fs::read_to_string(&path)?;
-    let content = match tail_lines {
-        Some(n) => {
-            let lines: Vec<&str> = content.lines().collect();
-            let start = lines.len().saturating_sub(n);
-            lines[start..].join("\n")
-        }
-        None => content,
-    };
-
+    let (content, modified_at) = read_tail(&path, tail_lines.unwrap_or(200))?;
     Ok(LogFileResult {
         content,
         modified_at,
@@ -1033,6 +1000,30 @@ mod tests {
         assert_eq!(start_disposition(Some(&service)), "loaded");
         service.pid = Some(123);
         assert_eq!(start_disposition(Some(&service)), "running");
+    }
+
+    #[test]
+    fn bounded_tail_handles_large_lines_and_invalid_utf8() {
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("pipe");
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is a valid NUL-terminated path in a disposable fixture.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(read_tail(fifo.to_str().unwrap(), 10).is_err());
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut bytes = vec![b'x'; 1024 * 1024];
+        bytes.extend_from_slice(b"\nlast\n\xffend\n");
+        std::fs::write(file.path(), &bytes).unwrap();
+        let (text, _) = read_tail(file.path().to_str().unwrap(), 2).unwrap();
+        assert_eq!(text, "last\n\u{fffd}end");
+        assert!(
+            read_tail(file.path().to_str().unwrap(), 2000)
+                .unwrap()
+                .0
+                .len()
+                <= 256 * 1024 + 3
+        );
     }
 
     fn security_test_config() -> PlistConfig {
@@ -1381,6 +1372,7 @@ mod tests {
                 wake_system: None,
                 metadata: LaunchControlMetadata {
                     health_status: Some("healthy".to_string()),
+                    last_health_check_at: Some(current_epoch_millis()),
                     health_detail: Some(
                         "GET http://127.0.0.1:3002/ succeeded: Found. Redirecting to /dashboard"
                             .to_string(),
@@ -1457,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn suggest_repair_treats_hermes_gateway_as_healthy_when_startup_markers_are_present() {
+    fn suggest_repair_keeps_nonzero_exit_despite_historical_gateway_markers() {
         let job = LaunchdJob {
             label: "ai.hermes.gateway".to_string(),
             plist_path: "/Users/jeffreycruz/Library/LaunchAgents/ai.hermes.gateway.plist"
@@ -1506,27 +1498,13 @@ WARNING tools.mcp_tool: MCP server 'redmine' failed initial connection after 3 a
 
         let diagnosis = suggest_repair(&job, Some(stderr_excerpt), Some(stdout_excerpt));
 
-        assert_eq!(diagnosis.health_status.as_deref(), Some("healthy"));
-        assert!(
-            diagnosis
-                .summary
-                .starts_with("Hermes Gateway is running normally"),
-            "unexpected summary: {}",
-            diagnosis.summary
-        );
-        assert!(diagnosis.likely_causes.is_empty());
-        assert!(diagnosis.suggestions.is_empty());
-        assert!(
-            diagnosis
-                .health_detail
-                .as_deref()
-                .unwrap_or_default()
-                .contains("Gateway running")
-        );
+        assert_eq!(diagnosis.health_status.as_deref(), Some("unhealthy"));
+        assert!(diagnosis.summary.contains("nonzero"));
+        assert!(!diagnosis.likely_causes.is_empty());
     }
 
     #[test]
-    fn suggest_repair_downgrades_timestampless_stderr_to_stale_unknown() {
+    fn suggest_repair_retains_authoritative_failure_without_log_timestamps() {
         let job = LaunchdJob {
             label: "ai.example.service".to_string(),
             plist_path: "/Users/jeffreycruz/Library/LaunchAgents/ai.example.service.plist"
@@ -1566,20 +1544,8 @@ RuntimeError: boom
 
         let diagnosis = suggest_repair(&job, Some(stderr_excerpt), None);
 
-        assert_eq!(diagnosis.health_status.as_deref(), Some("unknown"));
-        assert!(
-            diagnosis.summary.contains("stale"),
-            "unexpected summary: {}",
-            diagnosis.summary
-        );
-        assert!(diagnosis.likely_causes.is_empty());
-        assert!(diagnosis.suggestions.is_empty());
-        assert!(
-            diagnosis
-                .health_detail
-                .as_deref()
-                .unwrap_or_default()
-                .contains("no timestamps")
-        );
+        assert_eq!(diagnosis.health_status.as_deref(), Some("unhealthy"));
+        assert!(diagnosis.summary.contains("nonzero"));
+        assert!(!diagnosis.likely_causes.is_empty());
     }
 }

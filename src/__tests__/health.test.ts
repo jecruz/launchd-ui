@@ -26,7 +26,7 @@ describe("health derivation", () => {
     }
 
     expect(deriveHealthText(job as Parameters<typeof deriveHealthText>[0])).toBe("Running")
-    expect(describeHealth(job as Parameters<typeof describeHealth>[0])).toBe("Running")
+    expect(describeHealth(job as Parameters<typeof describeHealth>[0])).toBe("No explicit health check configured")
   })
 
   it("shows attention for an unhealthy stopped job", () => {
@@ -83,4 +83,14 @@ describe("health derivation", () => {
       "No explicit health check configured"
     )
   })
+})
+
+it("requires a recent non-future probe and a running job before showing Healthy", () => {
+  const metadata = { health_status: "healthy", last_health_check_at: String(Date.now()) } as LaunchControlMetadata
+  const job = { status: "Running" as const, last_exit_code: 0, metadata }
+  expect(deriveHealthText(job)).toBe("Healthy")
+  expect(deriveHealthText({ ...job, status: "Loaded" })).toBe("Loaded")
+  expect(deriveHealthText({ ...job, metadata: { ...metadata, last_health_check_at: String(Date.now() - 301_000) } })).toBe("Running")
+  expect(deriveHealthText({ ...job, metadata: { ...metadata, last_health_check_at: String(Date.now() + 60_000) } })).toBe("Running")
+  expect(deriveHealthText({ ...job, last_exit_code: 1 })).toBe("Attention")
 })

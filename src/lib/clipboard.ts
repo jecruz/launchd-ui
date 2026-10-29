@@ -3,8 +3,7 @@
  */
 export async function copyTextToClipboard(text: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text)
-    return
+    try { await navigator.clipboard.writeText(text); return } catch { /* WebView permission failures use the fallback below. */ }
   }
 
   const textarea = document.createElement("textarea")
@@ -16,8 +15,8 @@ export async function copyTextToClipboard(text: string): Promise<void> {
   document.body.appendChild(textarea)
   textarea.select()
 
-  const succeeded = document.execCommand("copy")
-  document.body.removeChild(textarea)
+  let succeeded = false
+  try { succeeded = document.execCommand("copy") } finally { textarea.remove() }
 
   if (!succeeded) {
     throw new Error("Failed to copy text to the clipboard.")

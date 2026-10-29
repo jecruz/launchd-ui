@@ -45,10 +45,12 @@ export function deriveHealthText(job: HealthSubject): string {
   if (job.last_exit_code !== null && job.last_exit_code !== undefined && job.last_exit_code !== 0) {
     return "Attention"
   }
-  if (metadata.health_status === "healthy") {
+  const checked = Number(metadata.last_health_check_at)
+  const fresh = Number.isSafeInteger(checked) && checked > 0 && checked <= Date.now() && Date.now() - checked <= 300_000
+  if (fresh && job.status === "Running" && metadata.health_status === "healthy") {
     return "Healthy"
   }
-  if (metadata.health_status === "unhealthy") {
+  if (fresh && metadata.health_status === "unhealthy") {
     return "Attention"
   }
   if (job.status === "Running") {
@@ -69,7 +71,7 @@ export function describeHealth(job: LaunchdJob | JobListEntry): string {
     ? `Last exit code: ${job.last_exit_code}`
     : null
   const noExplicitHealthCheck =
-    getMetadata(job).health_status === "unknown" && !hasExplicitHealthCheck(job)
+    (getMetadata(job).health_status === "unknown" || getMetadata(job).health_status == null) && !hasExplicitHealthCheck(job)
 
   const healthLine = noExplicitHealthCheck
     ? "No explicit health check configured"

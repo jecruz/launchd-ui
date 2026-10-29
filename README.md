@@ -106,14 +106,24 @@ Quick start:
 4. Choose `Summarize`, `Plan fix`, or `Propose command`, then click `Run Prompt`.
 5. Use the `LLM draft` or `Migration assistant` panels in `New Agent` to prefill a LaunchAgent from a natural-language request or a Docker/OrbStack service definition.
 6. In a job’s `Health` panel, click `Repair` to open the editor with inferred health check URL or command defaults when the service type is recognizable.
-7. For `ai.hermes.gateway`, normal startup markers like `Gateway running`, `api server listening`, and `telegram connected` are treated as healthy even if older stderr warnings remain in the log tail.
-8. If a log excerpt has no timestamps, Daemonic treats it as potentially stale and avoids upgrading that excerpt to a hard `unhealthy` or `Repair` state by itself.
+7. A successful probe is displayed as healthy only for a running service and for five minutes after the check. Historical startup markers never override a non-zero exit code.
+8. Timestamp-free stderr does not erase independent failure evidence. Diagnostic and viewer tails read at most 256 KiB and 2,000 lines, including files with very long lines.
 9. When a job has no explicit health check configured and no concrete repair suggestion, the Health panel stays informational and hides the `Repair` button.
 10. Hover any code or log block to reveal a copy button. Press `Cmd/Ctrl+A` while the block is focused to select all text inside it, then click copy to capture the selected text or the raw block. Click a job label or file path label to copy it directly.
 11. `New Agent` always starts a blank draft, even if you were editing a different plist before. Calendar schedule edits are preserved in the durable draft state until you save or cancel.
 12. In the `Schedule` section, use the `Calendar agent` presets for common clock-based jobs: `Daily 9:00`, `Weekdays 9:00`, or `Every hour`.
 
 The control surface shows readiness checks for executable, model, host, and prompt mode. Prompt execution stays disabled until the selected provider is complete. This is a local tool runner, not a remote chat API.
+
+## Durable state and recovery
+
+Preference changes are coalesced and saved in order, then flushed before window close or application quit. A failed save stays pending and is shown with a retry control. If the saved preferences cannot be loaded, autosave pauses to preserve the file; reloading requires confirmation before replacing in-memory edits. Window restoration fits the current display work areas.
+
+App state uses owned, nonlinked regular files, private directory/file permissions (0700/0600), a cross-process writer lock, and synced atomic replacement. A plist change and its metadata snapshot use a private recovery journal. Failure rolls both back; startup recovers interrupted transactions. A conflicting external edit is preserved and blocks recovery for operator review. This recovers files and metadata; a service stopped before a failed deletion can remain stopped. New complete metadata snapshots honor explicit empty lists and cleared fields; legacy partial snapshots retain inheritance behavior.
+
+Draft autosave deliberately omits command arguments, environment values, and raw plist text. Restored drafts display a re-entry notice. Existing app preferences are sanitized when loaded; older files under the legacy `launchd-ui` directory are retained and may still contain historical sensitive data. Do not put credentials in service descriptions or other ordinary metadata.
+
+New log destinations require an existing owned directory without writable shared parents or symlinks. On an authorized app launch, Daemonic prepares `~/Library/Logs/Daemonic` with private permissions. Existing jobs using shared log directories must be reviewed before saving. Calendar fields are checked against launchd ranges; Day and Weekday match either condition when both are supplied. Model drafts undergo the same checks and cannot silently drop migration schedule, environment, or port fields.
 
 ## Assistant Modes
 

@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react"
+import { act, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { JobDetail } from "./JobDetail"
@@ -65,6 +65,7 @@ describe("JobDetail", () => {
       getJobDetail()
       return {
         ...baseJob,
+        last_exit_code: count === 0 ? 1 : 0,
         plist: {
           ...baseJob.plist,
           metadata: {
@@ -73,7 +74,7 @@ describe("JobDetail", () => {
             health_detail:
               count === 0
                 ? "GET http://127.0.0.1:3001/ failed"
-                : "GET http://127.0.0.1:3002/ succeeded: Found. Redirecting to /dashboard",
+                : "Health probe returned HTTP 200 OK.",
             health_check_url: count === 0 ? "http://127.0.0.1:3001/" : "http://127.0.0.1:3002/",
             ports: count === 0 ? [3001] : [3002],
           },
@@ -83,6 +84,7 @@ describe("JobDetail", () => {
 
     setFakeHandler("diagnose_service", () => {
       diagnoseService()
+      if (diagnoseService.mock.calls.length > 1) return { summary: "The service is healthy. Health probe returned HTTP 200 OK.", likely_causes: [], suggestions: [], stderr_excerpt: null, stdout_excerpt: null, health_status: "healthy", health_detail: "Health probe returned HTTP 200 OK.", suggested_metadata: null }
       return {
         summary: "Uptime Kuma is likely failing because its health/port metadata is incomplete.",
         likely_causes: ["The saved health URL points at the wrong port."],
@@ -97,7 +99,7 @@ describe("JobDetail", () => {
 
     setFakeHandler("check_service_health", () => ({
       status: "healthy",
-      detail: "GET http://127.0.0.1:3002/ succeeded: Found. Redirecting to /dashboard",
+      detail: "Health probe returned HTTP 200 OK.",
       checked_at: String(Date.now()),
     }))
 
@@ -117,7 +119,7 @@ describe("JobDetail", () => {
     await waitFor(() =>
       expect(
         screen.getByText(
-          "The service is healthy. GET http://127.0.0.1:3002/ succeeded: Found. Redirecting to /dashboard"
+          "The service is healthy. Health probe returned HTTP 200 OK."
         )
       ).toBeInTheDocument()
     )
@@ -281,4 +283,34 @@ describe("JobDetail", () => {
 
     expect(writeText).toHaveBeenCalledWith("ai.cybergrunt.uptime-kuma")
   })
+})
+
+it.each(["detail", "diagnosis"])("ignores a stale %s response after selecting another job", async (phase) => {
+  let resolveOld!: (value: unknown) => void
+  const pending = new Promise((resolve) => { resolveOld = resolve })
+  const next = { ...baseJob, label: "com.example.next", plist_path: "/Users/test/Library/LaunchAgents/com.example.next.plist", plist: { ...baseJob.plist, label: "com.example.next" } }
+  const diagnosis = (summary: string) => ({ summary, likely_causes: [], suggestions: [], health_status: "healthy", health_detail: null, suggested_metadata: null, stderr_excerpt: null, stdout_excerpt: null })
+  const oldStarted = vi.fn()
+  setFakeHandler("get_job_detail", ({ plistPath }) => {
+    if (plistPath === next.plist_path) return next
+    if (phase === "detail") { oldStarted(); return pending }
+    return baseJob
+  })
+  setFakeHandler("diagnose_service", ({ plistPath }) => {
+    if (plistPath === next.plist_path) return diagnosis("Current diagnosis")
+    oldStarted()
+    return pending
+  })
+  const onEdit = vi.fn()
+  const props = { open: true, onClose: vi.fn(), onEdit, onRepair: vi.fn() }
+  const view = render(<JobDetail {...props} plistPath={baseJob.plist_path} />)
+  await waitFor(() => expect(oldStarted).toHaveBeenCalled())
+  view.rerender(<JobDetail {...props} plistPath={next.plist_path} />)
+  await screen.findByText("Current diagnosis")
+  await act(async () => resolveOld(phase === "detail" ? baseJob : diagnosis("Obsolete diagnosis")))
+  expect(screen.getByRole("button", { name: "Copy label com.example.next" })).toBeInTheDocument()
+  expect(screen.queryByText("Obsolete diagnosis")).not.toBeInTheDocument()
+  await userEvent.setup().click(screen.getByRole("button", { name: "Edit" }))
+  expect(onEdit).toHaveBeenCalledWith(next)
+  resetFakeHandlers()
 })

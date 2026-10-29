@@ -1,8 +1,14 @@
 import { describe, it, expect, vi } from "vitest"
 import userEvent from "@testing-library/user-event"
 import { render, screen, within } from "@testing-library/react"
-import type { ComponentProps } from "react"
-import { JobList } from "./JobList"
+import { useState, type ComponentProps } from "react"
+import { JobList as JobTable } from "./JobList"
+
+function JobList(props: Partial<ComponentProps<typeof JobTable>> & { jobs: JobListEntry[] }) {
+  const [key, setKey] = useState<ComponentProps<typeof JobTable>["sortKey"]>(props.sortKey ?? "health")
+  const [direction, setDirection] = useState<ComponentProps<typeof JobTable>["sortDirection"]>(props.sortDirection ?? "asc")
+  return <JobTable {...props as ComponentProps<typeof JobTable>} sortKey={key} sortDirection={direction} onSortChange={(key, direction) => { setKey(key); setDirection(direction); props.onSortChange?.(key, direction) }} />
+}
 import type { JobListEntry } from "@/types"
 
 const mockJobs: JobListEntry[] = [

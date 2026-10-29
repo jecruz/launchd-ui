@@ -1,3 +1,4 @@
+import { validateSchedule, validateHourRange } from "./schedule-validation"
 import type { CalendarInterval } from "@/types"
 
 export type HourRangeResult = {
@@ -55,6 +56,7 @@ export function expandHourRange(
   from: number,
   to: number
 ): CalendarInterval[] {
+  try { validateHourRange(from, to); validateSchedule(null, [base]) } catch { return [] }
   const result: CalendarInterval[] = []
   for (let h = from; h <= to; h++) {
     result.push({ ...base, hour: h })
@@ -78,6 +80,7 @@ function formatDateTime(date: Date): string {
  */
 export function getNextOccurrences(ci: CalendarInterval, count: number): Date[] {
   const results: Date[] = []
+  try { validateSchedule(null, [ci]) } catch { return results }
   const now = new Date()
   const candidate = new Date(now)
   candidate.setSeconds(0, 0)
@@ -85,13 +88,13 @@ export function getNextOccurrences(ci: CalendarInterval, count: number): Date[] 
 
   const limit = 400 * 24 * 60
   for (let i = 0; i < limit && results.length < count; i++) {
-    const matches =
-      (ci.month === null || ci.month === undefined || candidate.getMonth() + 1 === ci.month) &&
-      (ci.day === null || ci.day === undefined || candidate.getDate() === ci.day) &&
-      (ci.weekday === null || ci.weekday === undefined || candidate.getDay() === ci.weekday) &&
-      (ci.hour === null || ci.hour === undefined || candidate.getHours() === ci.hour) &&
-      (ci.minute === null || ci.minute === undefined || candidate.getMinutes() === ci.minute)
-
+    const dayMatches = ci.day == null || candidate.getDate() === ci.day
+    const weekdayMatches = ci.weekday == null || candidate.getDay() === ci.weekday % 7
+    // launchd.plist treats Day and Weekday as OR when both are specified.
+    const calendarDayMatches = ci.day != null && ci.weekday != null ? dayMatches || weekdayMatches : dayMatches && weekdayMatches
+    const matches = (ci.month == null || candidate.getMonth() + 1 === ci.month)
+      && calendarDayMatches && (ci.hour == null || candidate.getHours() === ci.hour)
+      && (ci.minute == null || candidate.getMinutes() === ci.minute)
     if (matches) {
       results.push(new Date(candidate))
     }
@@ -129,7 +132,7 @@ export function formatCalendarIntervals(intervals: CalendarInterval[]): string {
   if (range) {
     const parts: string[] = []
     if (range.base.weekday !== null && range.base.weekday !== undefined) {
-      parts.push(`Every ${weekdayLabels[range.base.weekday]}`)
+      parts.push(`Every ${weekdayLabels[range.base.weekday % 7]}`)
     } else if (range.base.day !== null && range.base.day !== undefined) {
       parts.push(`Day ${range.base.day} of each month`)
     } else if (range.base.month !== null && range.base.month !== undefined) {
@@ -148,7 +151,7 @@ export function formatCalendarIntervals(intervals: CalendarInterval[]): string {
 function formatSingleCalendarInterval(ci: CalendarInterval): string {
   const parts: string[] = []
   if (ci.weekday !== null && ci.weekday !== undefined) {
-    parts.push(`Every ${weekdayLabels[ci.weekday]}`)
+    parts.push(`Every ${weekdayLabels[ci.weekday % 7]}`)
   } else if (ci.day !== null && ci.day !== undefined) {
     parts.push(`Day ${ci.day} of each month`)
   } else if (ci.month !== null && ci.month !== undefined) {

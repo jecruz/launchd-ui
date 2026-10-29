@@ -92,3 +92,6 @@ export const getAppPreferences = () =>
 
 export const saveAppPreferences = (preferences: AppPreferences) =>
   invoke<AppPreferences>("save_app_preferences", { preferences })
+
+/** Exit after pending preferences have been durably saved or explicitly discarded. */
+export async function finishQuit(): Promise<void> { await invoke("finish_quit") }

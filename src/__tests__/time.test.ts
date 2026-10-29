@@ -10,5 +10,6 @@ describe("formatEpochMillis24", () => {
 
   it("returns a dash for invalid timestamps", () => {
     expect(formatEpochMillis24("not-a-number")).toBe("—")
+    expect(formatEpochMillis24("999999999999999999999")).toBe("—")
   })
 })

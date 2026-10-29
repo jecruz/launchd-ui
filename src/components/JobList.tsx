@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useMemo } from "react"
 import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react"
 import {
   Table,
@@ -9,10 +9,13 @@ import {
 } from "@/components/ui/table"
 import { JobRow } from "@/components/JobRow"
 import { Button } from "@/components/ui/button"
-import type { JobListEntry } from "@/types"
+import type { JobListEntry, JobSortKey, SortDirection } from "@/types"
 import { deriveHealthText } from "@/lib/health"
 
 type JobListProps = {
+  sortKey: JobSortKey
+  sortDirection: SortDirection
+  onSortChange: (key: JobSortKey, direction: SortDirection) => void
   jobs: JobListEntry[]
   loading: boolean
   onStart: (job: JobListEntry) => void
@@ -25,8 +28,7 @@ type JobListProps = {
   onRevealInFinder: (job: JobListEntry) => void
 }
 
-type SortKey = "label" | "group" | "source" | "status" | "pid" | "last_run_at" | "health"
-type SortDirection = "asc" | "desc"
+type SortKey = JobSortKey
 
 const sourceOrder: Record<JobListEntry["source"], number> = {
   UserAgent: 0,
@@ -144,6 +146,9 @@ function SortButton({
 export function JobList({
   jobs,
   loading,
+  sortKey = "health",
+  sortDirection = "asc",
+  onSortChange,
   onStart,
   onStop,
   onRestart,
@@ -153,20 +158,12 @@ export function JobList({
   onSelect,
   onRevealInFinder,
 }: JobListProps) {
-  const [sortKey, setSortKey] = useState<SortKey>("health")
-  const [sortDirection, setSortDirection] = useState<SortDirection>("asc")
-
   const sortedJobs = useMemo(() => {
     return [...jobs].sort((a, b) => compareJobs(a, b, sortKey, sortDirection))
   }, [jobs, sortKey, sortDirection])
 
   const toggleSort = (key: SortKey) => {
-    if (key === sortKey) {
-      setSortDirection((current) => (current === "asc" ? "desc" : "asc"))
-      return
-    }
-    setSortKey(key)
-    setSortDirection("asc")
+    onSortChange(key, key === sortKey && sortDirection === "asc" ? "desc" : "asc")
   }
 
   if (loading) {

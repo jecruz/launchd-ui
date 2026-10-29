@@ -1,4 +1,4 @@
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { CopyableCodeBlock, CopyableInlineText } from "@/components/CopyableBlock"
@@ -24,9 +24,11 @@ function formatTime(date: Date): string {
 
 /** Show a job's logs and allow clearing only for mutable user agents. */
 export function LogViewer({ logPath, plistPath, readOnly = false, tailLines = 200 }: LogViewerProps) {
+  const [clearError, setClearError] = useState<string | null>(null)
   const { content, modifiedAt, loading, error, fetchLog } = useLogs()
 
   useEffect(() => {
+    setClearError(null)
     if (logPath) {
       fetchLog(logPath, tailLines)
     }
@@ -69,10 +71,10 @@ export function LogViewer({ logPath, plistPath, readOnly = false, tailLines = 20
             variant="ghost"
             size="sm"
             onClick={async () => {
-              await clearLogFile(logPath, plistPath)
-              fetchLog(logPath, tailLines)
+              try { await clearLogFile(logPath, plistPath); await fetchLog(logPath, tailLines) }
+              catch (error) { setClearError(String(error)) }
             }}
-            disabled={readOnly}
+            disabled={readOnly || loading}
           >
             <Trash2 className="h-3 w-3 mr-1" />
             Clear
@@ -87,11 +89,12 @@ export function LogViewer({ logPath, plistPath, readOnly = false, tailLines = 20
           </Button>
         </div>
       </div>
+      {clearError && <div role="alert" className="text-sm text-destructive">{clearError}</div>}
       {error ? (
         <div className="text-sm text-destructive">{error}</div>
       ) : (
         <CopyableCodeBlock
-          text={content || "(empty)"}
+          text={content}
           copyLabel="Copy log text"
           className="h-64"
         >

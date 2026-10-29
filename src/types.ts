@@ -1,7 +1,7 @@
 export type JobSource = "UserAgent" | "SystemAgent" | "SystemDaemon"
 export type JobStatus = "Running" | "Loaded" | "Unloaded" | "Unknown"
 
-export type JobSortKey = "label" | "source" | "status" | "pid" | "last_run_at" | "health"
+export type JobSortKey = "group" | "label" | "source" | "status" | "pid" | "last_run_at" | "health"
 export type SortDirection = "asc" | "desc"
 
 export type JobListEntry = {
@@ -183,6 +183,7 @@ export type JobFormScheduleType = "none" | "interval" | "calendar"
 export type JobFormHourMode = "specific" | "every" | "range"
 
 export type JobFormDraft = {
+  sensitive_fields_omitted?: boolean
   editing_plist_path: string | null
   config: PlistConfig
   args: string

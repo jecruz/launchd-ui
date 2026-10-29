@@ -143,16 +143,24 @@ pub struct WindowGeometry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum JobFormScheduleType {
+    #[serde(alias = "None")]
     None,
+    #[serde(alias = "Interval")]
     Interval,
+    #[serde(alias = "Calendar")]
     Calendar,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum JobFormHourMode {
+    #[serde(alias = "Specific")]
     Specific,
+    #[serde(alias = "Every")]
     Every,
+    #[serde(alias = "Range")]
     Range,
 }
 
@@ -164,6 +172,8 @@ pub struct JobFormHourRange {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobFormDraft {
+    #[serde(default)]
+    pub sensitive_fields_omitted: bool,
     pub editing_plist_path: Option<String>,
     pub config: crate::types::PlistConfig,
     pub args: String,
@@ -191,24 +201,10 @@ fn read_json_with_legacy<T>(primary: PathBuf, legacy: PathBuf) -> Result<T, AppE
 where
     T: serde::de::DeserializeOwned + Default,
 {
-    match std::fs::read_to_string(&primary) {
-        Ok(contents) => serde_json::from_str(&contents)
-            .map_err(|e| AppError::AgentRuntime(format!("failed to parse {primary:?}: {e}"))),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            match std::fs::read_to_string(&legacy) {
-                Ok(contents) => serde_json::from_str(&contents).map_err(|e| {
-                    AppError::AgentRuntime(format!("failed to parse {legacy:?}: {e}"))
-                }),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
-                Err(err) => Err(AppError::AgentRuntime(format!(
-                    "failed to read {legacy:?}: {err}"
-                ))),
-            }
-        }
-        Err(err) => Err(AppError::AgentRuntime(format!(
-            "failed to read {primary:?}: {err}"
-        ))),
+    if let Some(value) = crate::state_io::read(&primary)? {
+        return Ok(value);
     }
+    Ok(crate::state_io::read(&legacy)?.unwrap_or_default())
 }
 
 fn settings_file() -> Result<PathBuf, AppError> {
@@ -227,40 +223,45 @@ pub fn load_agent_runtime_settings() -> Result<AgentRuntimeSettings, AppError> {
 }
 
 pub fn save_agent_runtime_settings(settings: &AgentRuntimeSettings) -> Result<(), AppError> {
-    let path = settings_file()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            AppError::AgentRuntime(format!(
-                "failed to create settings directory {parent:?}: {e}"
-            ))
-        })?;
+    crate::state_io::save(&settings_file()?, settings)
+}
+
+fn durable_preferences(preferences: &AppPreferences) -> AppPreferences {
+    let mut preferences = preferences.clone();
+    if let Some(draft) = preferences.job_form_draft.as_mut() {
+        draft.sensitive_fields_omitted |= draft.config.environment_variables.is_some()
+            || !draft.config.raw_xml.is_empty()
+            || !draft.args.is_empty()
+            || draft.config.program_arguments.is_some();
+        draft.config.environment_variables = None;
+        draft.config.raw_xml.clear();
+        draft.config.program_arguments = None;
+        draft.args.clear();
     }
-    let json = serde_json::to_string_pretty(settings)
-        .map_err(|e| AppError::AgentRuntime(format!("failed to serialize settings: {e}")))?;
-    std::fs::write(&path, json)
-        .map_err(|e| AppError::AgentRuntime(format!("failed to write {path:?}: {e}")))
+    preferences
 }
 
 pub fn load_app_preferences() -> Result<AppPreferences, AppError> {
-    read_json_with_legacy(
-        app_preferences_file()?,
-        legacy_app_settings_dir()?.join(APP_PREFERENCES_FILE_NAME),
+    let path = app_preferences_file()?;
+    crate::state_io::locked(
+        path.parent()
+            .ok_or_else(|| AppError::AgentRuntime("Invalid preferences path.".into()))?,
+        || {
+            let preferences: AppPreferences = read_json_with_legacy(
+                path.clone(),
+                legacy_app_settings_dir()?.join(APP_PREFERENCES_FILE_NAME),
+            )?;
+            let sanitized = durable_preferences(&preferences);
+            if sanitized != preferences {
+                crate::state_io::write(&path, &sanitized)?;
+            }
+            Ok(sanitized)
+        },
     )
 }
 
 pub fn save_app_preferences(preferences: &AppPreferences) -> Result<(), AppError> {
-    let path = app_preferences_file()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            AppError::AgentRuntime(format!(
-                "failed to create settings directory {parent:?}: {e}"
-            ))
-        })?;
-    }
-    let json = serde_json::to_string_pretty(preferences)
-        .map_err(|e| AppError::AgentRuntime(format!("failed to serialize preferences: {e}")))?;
-    std::fs::write(&path, json)
-        .map_err(|e| AppError::AgentRuntime(format!("failed to write {path:?}: {e}")))
+    crate::state_io::save(&app_preferences_file()?, &durable_preferences(preferences))
 }
 
 pub fn summarize_settings(settings: &AgentRuntimeSettings) -> AgentRuntimeSummary {
@@ -640,6 +641,50 @@ pub fn run_agent_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_draft_round_trips_lowercase_enums_and_omits_sensitive_containers() {
+        for (schedule, old_schedule) in [
+            ("none", "None"),
+            ("interval", "Interval"),
+            ("calendar", "Calendar"),
+        ] {
+            for (hour, old_hour) in [
+                ("specific", "Specific"),
+                ("every", "Every"),
+                ("range", "Range"),
+            ] {
+                let mut value = serde_json::json!({ "job_form_draft": {
+                    "editing_plist_path": null, "config": { "label": "safe", "raw_xml": "private draft", "environment_variables": { "EXAMPLE_VALUE": "fixture" }, "program_arguments": ["--example"] },
+                    "args": "--example", "schedule_type": schedule, "hour_mode": hour,
+                    "calendar_interval": null, "hour_range": { "from": 0, "to": 23 }
+                }});
+                let preferences: AppPreferences = serde_json::from_value(value.clone()).unwrap();
+                let serialized = serde_json::to_value(&preferences).unwrap();
+                assert_eq!(serialized["job_form_draft"]["schedule_type"], schedule);
+                assert_eq!(serialized["job_form_draft"]["hour_mode"], hour);
+                value["job_form_draft"]["schedule_type"] = old_schedule.into();
+                value["job_form_draft"]["hour_mode"] = old_hour.into();
+                assert_eq!(
+                    serde_json::from_value::<AppPreferences>(value).unwrap(),
+                    preferences
+                );
+                let durable = durable_preferences(&preferences).job_form_draft.unwrap();
+                assert!(durable.sensitive_fields_omitted);
+                assert!(durable.config.environment_variables.is_none());
+                assert!(durable.config.program_arguments.is_none());
+                assert!(durable.config.raw_xml.is_empty() && durable.args.is_empty());
+                assert!(
+                    preferences
+                        .job_form_draft
+                        .unwrap()
+                        .config
+                        .environment_variables
+                        .is_some()
+                );
+            }
+        }
+    }
 
     #[test]
     fn default_settings_are_serializable() {

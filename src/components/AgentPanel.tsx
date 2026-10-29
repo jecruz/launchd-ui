@@ -285,6 +285,8 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
     currentSelection.current = { path: selectedJob?.plist_path, generation: currentSelection.current.generation + 1 }
   }
 
+  useEffect(() => () => { currentSelection.current.generation += 1 }, [])
+
   const jobContext = useMemo(() => buildJobContext(selectedJob), [selectedJob])
   const proactiveInsights = useMemo(
     () => buildProactiveInsights(selectedJob, jobDetail),
@@ -339,6 +341,8 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
     setAppliedAction(null)
     setApprovalConfirmed(false)
     setStructuredResult(null)
+    setRunning(false)
+    setError(null)
   }, [selectedJob?.plist_path])
 
   const provider = settings?.provider ?? "Ollama"
@@ -348,6 +352,7 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
   )
 
   const applyStructuredAction = async (proposal: StructuredAgentResult, automatic = false) => {
+    const generation = currentSelection.current.generation
     if (!selectedJob || selectedJob.source !== "UserAgent") {
       setError("Only user agents can be mutated from the approved action path.")
       return
@@ -369,6 +374,8 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
         command_proposal: proposal.command_proposal,
         auto_apply: automatic,
       })
+      await onApplied?.()
+      if (generation !== currentSelection.current.generation) return
       setAppliedAction(`${result.action}: ${result.command}`)
       setVerificationDetail({
         ...(jobDetail ?? selectedJob),
@@ -397,9 +404,8 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
         last_exit_code: result.verified_last_exit_code,
         last_run_at: jobDetail?.last_run_at ?? selectedJob.last_run_at,
       })
-      await onApplied?.()
     } catch (e) {
-      setError(String(e))
+      if (generation === currentSelection.current.generation) setError(String(e))
       throw e
     }
   }
@@ -715,9 +721,9 @@ export function AgentPanel({ mode, selectedJob, onApplied }: AgentPanelProps) {
         await applyStructuredAction(parsed, true)
       }
     } catch (e) {
-      setError(String(e))
+      if (generation === currentSelection.current.generation) setError(String(e))
     } finally {
-      setRunning(false)
+      if (generation === currentSelection.current.generation) setRunning(false)
     }
   }
 

@@ -70,3 +70,14 @@ describe("useJobs", () => {
     expect(result.current.jobs.length).toBe(0)
   })
 })
+
+it("keeps the newest refresh when an older list resolves later", async () => {
+  let resolveOld!: (value: unknown) => void
+  let calls = 0
+  setFakeHandler("list_jobs", () => ++calls === 1 ? new Promise((resolve) => { resolveOld = resolve }) : [])
+  const { result } = renderHook(() => useJobs())
+  await act(() => result.current.refresh())
+  await act(async () => resolveOld([{ label: "obsolete" }]))
+  expect(result.current.jobs).toEqual([])
+  expect(result.current.loading).toBe(false)
+})

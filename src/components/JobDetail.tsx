@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import {
   Sheet,
   SheetContent,
@@ -78,105 +78,106 @@ function sortSuggestions(suggestions: ServiceRepairSuggestion[]) {
   })
 }
 
+/** Present one selected job and ignore asynchronous results for previous selections. */
 export function JobDetail({ plistPath, open, onClose, onEdit, onRepair }: JobDetailProps) {
-  const [job, setJob] = useState<LaunchdJob | null>(null)
+  const [loadedJob, setJob] = useState<LaunchdJob | null>(null)
+  const job = loadedJob?.plist_path === plistPath && open ? loadedJob : null
   const [loading, setLoading] = useState(false)
   const [checkingHealth, setCheckingHealth] = useState(false)
   const [healthMessage, setHealthMessage] = useState<string | null>(null)
   const [diagnosisLoading, setDiagnosisLoading] = useState(false)
   const [diagnosisError, setDiagnosisError] = useState<string | null>(null)
   const [diagnosis, setDiagnosis] = useState<ServiceDiagnosis | null>(null)
+  const selection = useRef({ key: `${open}:${plistPath}`, generation: 0 })
+  const key = `${open}:${plistPath}`
+  if (selection.current.key !== key) selection.current = { key, generation: selection.current.generation + 1 }
+  const diagnosisRequest = useRef(0)
+
+  const fetchDiagnosis = useCallback(async (path: string, generation: number) => {
+    const request = ++diagnosisRequest.current
+    const current = () => selection.current.generation === generation && request === diagnosisRequest.current
+    setDiagnosisLoading(true)
+    setDiagnosisError(null)
+    try {
+      const result = await diagnoseService(path)
+      if (current()) setDiagnosis(result)
+    } catch (error) {
+      if (current()) { setDiagnosisError(String(error)); setDiagnosis(null) }
+    } finally {
+      if (current()) setDiagnosisLoading(false)
+    }
+  }, [])
 
   useEffect(() => {
-    if (!plistPath || !open) return
-    setLoading(true)
+    const generation = selection.current.generation
+    const current = () => selection.current.generation === generation
+    setJob(null)
+    setDiagnosis(null)
     setHealthMessage(null)
     setDiagnosisError(null)
-    getJobDetail(plistPath)
-      .then(async (loaded) => {
-        setJob(loaded)
-        try {
-          setDiagnosisLoading(true)
-          const result = await diagnoseService(plistPath)
-          setDiagnosis(result)
-        } catch (error) {
-          setDiagnosisError(String(error))
-          setDiagnosis(null)
-        } finally {
-          setDiagnosisLoading(false)
-        }
-      })
-      .catch(() => setJob(null))
-      .finally(() => setLoading(false))
-  }, [plistPath, open])
+    setCheckingHealth(false)
+    setDiagnosisLoading(false)
+    if (!plistPath || !open) { setLoading(false); return }
+    setLoading(true)
+    void getJobDetail(plistPath).then(async (loaded) => {
+      if (!current()) return
+      setJob(loaded)
+      await fetchDiagnosis(plistPath, generation)
+    }).catch((error) => { if (current()) setDiagnosisError(String(error)) })
+      .finally(() => { if (current()) setLoading(false) })
+    return () => { selection.current.generation += 1 }
+  }, [plistPath, open, fetchDiagnosis])
 
   const handleCheckHealth = async () => {
     if (!job) return
+    const generation = selection.current.generation
+    const current = () => selection.current.generation === generation
     setCheckingHealth(true)
     setHealthMessage(null)
     try {
       const result = await checkServiceHealth(job.plist_path)
+      if (!current()) return
       setHealthMessage(`${result.status}: ${result.detail}`)
       const refreshed = await getJobDetail(job.plist_path)
+      if (!current()) return
       setJob(refreshed)
-      const updatedDiagnosis = await diagnoseService(job.plist_path)
-      setDiagnosis(
-        result.status === "healthy"
-          ? {
-              ...updatedDiagnosis,
-              summary: `The service is healthy. ${result.detail}`,
-              likely_causes: [],
-              suggestions: [],
-              stderr_excerpt: null,
-              stdout_excerpt: null,
-              health_status: result.status,
-              health_detail: result.detail,
-              suggested_metadata: null,
-            }
-          : updatedDiagnosis
-      )
+      await fetchDiagnosis(job.plist_path, generation)
     } catch (error) {
-      setHealthMessage(String(error))
+      if (current()) setHealthMessage(String(error))
     } finally {
-      setCheckingHealth(false)
+      if (current()) setCheckingHealth(false)
     }
   }
 
   const handleRefreshDiagnosis = async () => {
-    if (!job) return
-    setDiagnosisLoading(true)
-    setDiagnosisError(null)
-    try {
-      const result = await diagnoseService(job.plist_path)
-      setDiagnosis(result)
-    } catch (error) {
-      setDiagnosisError(String(error))
-    } finally {
-      setDiagnosisLoading(false)
-    }
+    if (job) await fetchDiagnosis(job.plist_path, selection.current.generation)
   }
 
   const handleApplySuggestedMetadata = async () => {
-    if (!job?.plist.metadata || !diagnosis?.suggested_metadata) return
-    const nextPlist = {
-      ...job.plist,
-      metadata: {
-        ...job.plist.metadata,
-        ...diagnosis.suggested_metadata,
-      },
+    if (!job || job.source !== "UserAgent" || !diagnosis?.suggested_metadata) return
+    const generation = selection.current.generation
+    const current = () => selection.current.generation === generation
+    setCheckingHealth(true)
+    try {
+      await saveJob(job.plist_path, { ...job.plist, metadata: { ...job.plist.metadata, ...diagnosis.suggested_metadata } })
+      if (!current()) return
+      await checkServiceHealth(job.plist_path)
+      if (!current()) return
+      const refreshed = await getJobDetail(job.plist_path)
+      if (!current()) return
+      setJob(refreshed)
+      await fetchDiagnosis(job.plist_path, generation)
+    } catch (error) {
+      if (current()) setDiagnosisError(String(error))
+    } finally {
+      if (current()) setCheckingHealth(false)
     }
-    await saveJob(job.plist_path, nextPlist)
-    await checkServiceHealth(job.plist_path).catch(() => undefined)
-    const refreshed = await getJobDetail(job.plist_path)
-    setJob(refreshed)
-    const result = await diagnoseService(job.plist_path)
-    setDiagnosis(result)
   }
 
   const noExplicitHealthCheck =
     Boolean(job) &&
-    job?.plist.metadata.health_status === "unknown" &&
-    !hasExplicitHealthCheck(job)
+    (job?.plist.metadata.health_status === "unknown" || job?.plist.metadata.health_status == null) &&
+    !(job && hasExplicitHealthCheck(job))
   const showRepairButton =
     job?.source === "UserAgent" &&
     Boolean(diagnosis?.suggested_metadata || (diagnosis?.suggestions?.length ?? 0) > 0)

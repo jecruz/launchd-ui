@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react"
+import { validateSchedule, validateHourRange } from "@/lib/schedule-validation"
+import { useEffect, useRef, useState } from "react"
 import {
   Dialog,
   DialogClose,
@@ -99,6 +100,7 @@ type RepairMetadataHints = Pick<
   "health_check_url" | "health_check_command" | "ports" | "template" | "migration_hint"
 >
 
+const DRAFT_SCHEMA = "Use these keys exactly: label, args, group, tags, managed_by, description, environment, health_check_url, health_check_command, ports, template, migration_hint, schedule_type, run_at_load, keep_alive, start_interval, calendar_interval, hour_mode, hour_range, working_directory, standard_out_path, standard_error_path, environment_variables, disabled, wake_system, summary, notes, risks."
 const APP_NAME = "Daemonic"
 const APP_DIR_NAME = "Daemonic"
 
@@ -285,7 +287,7 @@ const serviceTemplateOptions: Array<{ value: "custom" | ServiceTemplateKey; labe
 
 function resolveTemplateKey(value: string | null | undefined): ServiceTemplateKey | null {
   if (!value) return null
-  return value in serviceTemplatePresets ? (value as ServiceTemplateKey) : null
+  return Object.prototype.hasOwnProperty.call(serviceTemplatePresets, value) ? (value as ServiceTemplateKey) : null
 }
 
 function parseDeclaredPort(programArguments: string[] | null): number | null {
@@ -317,14 +319,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function toNullableNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null
+  if (value === null || value === undefined) return null
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("Generated numeric fields must be numbers.")
+  return value
 }
 
 function toStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
 }
 
-function parseGeneratedJobFormDraft(input: string): GeneratedJobFormDraft | null {
+function parseGeneratedJobFormDraft(input: string, migration = false): GeneratedJobFormDraft | null {
   const fenced = input.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim()
   const candidate = fenced ?? input.trim()
   const start = candidate.indexOf("{")
@@ -340,6 +344,7 @@ function parseGeneratedJobFormDraft(input: string): GeneratedJobFormDraft | null
     if (typeof parsed.label !== "string" || typeof parsed.args !== "string") {
       return null
     }
+    if (migration && ["ports", "working_directory", "environment_variables", "schedule_type", "start_interval", "calendar_interval", "hour_mode", "hour_range"].some((key) => !Object.prototype.hasOwnProperty.call(parsed, key))) return null
 
     const schedule_type =
       parsed.schedule_type === "interval" || parsed.schedule_type === "calendar"
@@ -360,10 +365,16 @@ function parseGeneratedJobFormDraft(input: string): GeneratedJobFormDraft | null
 
     const hour_range = isRecord(parsed.hour_range)
       ? {
-          from: Math.max(0, Math.min(23, toNullableNumber(parsed.hour_range.from) ?? 7)),
-          to: Math.max(0, Math.min(23, toNullableNumber(parsed.hour_range.to) ?? 23)),
+          from: toNullableNumber(parsed.hour_range.from) ?? 7,
+          to: toNullableNumber(parsed.hour_range.to) ?? 23,
         }
       : { from: 7, to: 23 }
+
+    validateSchedule(toNullableNumber(parsed.start_interval), calendar_interval ? [calendar_interval] : null)
+    validateHourRange(hour_range.from, hour_range.to)
+    if (schedule_type === "interval" && (!Number.isSafeInteger(parsed.start_interval) || Number(parsed.start_interval) < 1)) return null
+    if (schedule_type === "calendar" && !calendar_interval) return null
+    if (Array.isArray(parsed.ports) && parsed.ports.some((value) => !Number.isInteger(value) || value < 1 || value > 65535)) return null
 
     return {
       label: parsed.label,
@@ -392,9 +403,7 @@ function parseGeneratedJobFormDraft(input: string): GeneratedJobFormDraft | null
           ? parsed.health_check_command
           : null,
       ports: Array.isArray(parsed.ports)
-        ? parsed.ports
-            .filter((item): item is number => typeof item === "number" && Number.isFinite(item))
-            .map((port) => Math.max(0, Math.min(65535, Math.trunc(port))))
+        ? parsed.ports as number[]
         : [],
       template:
         typeof parsed.template === "string" && parsed.template.trim().length > 0
@@ -446,7 +455,7 @@ function buildGeneratedDraftPrompt(request: string): string {
   return [
     "You are drafting a new user LaunchAgent for Daemonic.",
     "Return valid JSON only. No markdown fences, commentary, or prose.",
-    "Use these keys exactly: label, args, group, tags, managed_by, description, environment, health_check_url, health_check_command, ports, template, migration_hint, schedule_type, run_at_load, keep_alive, start_interval, calendar_interval, hour_mode, hour_range, working_directory, standard_out_path, standard_error_path, environment_variables, disabled, wake_system, summary, notes, risks.",
+    DRAFT_SCHEMA,
     "Values should be conservative defaults suitable for a user agent under ~/Library/LaunchAgents.",
     "label must be reverse-DNS style and unique.",
     "group should identify the service family, for example CAISS System.",
@@ -559,29 +568,28 @@ export function createRepairJobFormDraftFromJob(
       metadata: {
         ...currentMetadata,
         health_check_url: suggestedMetadata
-          ? hints.health_check_url ?? currentMetadata.health_check_url
+          ? hints.health_check_url
           : currentMetadata.health_check_url ?? hints.health_check_url,
         health_check_command: suggestedMetadata
-          ? hints.health_check_command ?? currentMetadata.health_check_command
+          ? hints.health_check_command
           : currentMetadata.health_check_command ?? hints.health_check_command,
         ports: suggestedMetadata
-          ? hints.ports.length > 0
-            ? hints.ports
-            : currentMetadata.ports
+          ? hints.ports
           : currentMetadata.ports.length > 0
             ? currentMetadata.ports
             : hints.ports,
         template: suggestedMetadata
-          ? hints.template ?? currentMetadata.template
+          ? hints.template
           : currentMetadata.template ?? hints.template,
         migration_hint: suggestedMetadata
-          ? hints.migration_hint ?? currentMetadata.migration_hint
+          ? hints.migration_hint
           : currentMetadata.migration_hint ?? hints.migration_hint,
       },
     },
   }
 }
 
+/** Edit a single draft, rehydrating explicit incoming targets without overwriting local edits. */
 export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChange }: JobFormProps) {
   const initialDraft = draft ?? (editingJob ? createJobFormDraftFromJob(editingJob) : createEmptyJobFormDraft())
   const [config, setConfig] = useState<PlistConfig>(initialDraft.config)
@@ -615,6 +623,40 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
   const [runtimeReady, setRuntimeReady] = useState(false)
   const [runtimeSummary, setRuntimeSummary] = useState<string>("")
   const [homeDir, setHomeDir] = useState<string | null>(null)
+
+  const formGeneration = useRef(0)
+  useEffect(() => () => { formGeneration.current += 1 }, [])
+  const lastEmitted = useRef<JobFormDraft | null>(null)
+  const lastInput = useRef<{ open: boolean; path: string | null; draft: JobFormDraft | null | undefined }>({ open: false, path: null, draft: undefined })
+  const hydrating = useRef(false)
+  const [hydrationVersion, setHydrationVersion] = useState(0)
+  const [sensitiveOmitted, setSensitiveOmitted] = useState(initialDraft.sensitive_fields_omitted ?? false)
+
+  useEffect(() => {
+    const path = editingJob?.plist_path ?? draft?.editing_plist_path ?? null
+    const changed = open && (!lastInput.current.open || path !== lastInput.current.path || (draft !== lastInput.current.draft && draft !== lastEmitted.current))
+    lastInput.current = { open, path, draft }
+    if (!changed) return
+    const next = editingJob && draft?.editing_plist_path !== editingJob.plist_path
+      ? createJobFormDraftFromJob(editingJob)
+      : draft ?? (editingJob ? createJobFormDraftFromJob(editingJob) : createEmptyJobFormDraft())
+    formGeneration.current += 1
+    hydrating.current = true
+    setConfig(next.config)
+    setArgs(next.args)
+    setScheduleType(next.schedule_type)
+    setHourMode(next.hour_mode)
+    setHourRange(next.hour_range)
+    setCalendarInterval(next.calendar_interval ?? next.config.start_calendar_interval?.[0] ?? { minute: 0, hour: 9, day: null, weekday: null, month: null })
+    setSensitiveOmitted(next.sensitive_fields_omitted ?? false)
+    setSaving(false)
+    setDrafting(false)
+    setMigrationDrafting(false)
+    setDraftStatus(null)
+    setMigrationStatus(null)
+    setError(null)
+    setHydrationVersion((value) => value + 1)
+  }, [open, draft, editingJob])
 
   const applyCalendarPreset = (preset: "daily" | "weekday" | "hourly") => {
     setScheduleType("calendar")
@@ -704,7 +746,10 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
   }, [open])
 
   useEffect(() => {
-    onDraftChange({
+    if (!open) return
+    if (hydrating.current) { hydrating.current = false; return }
+    const next: JobFormDraft = {
+      sensitive_fields_omitted: sensitiveOmitted,
       editing_plist_path: editTargetPath ?? null,
       config,
       args,
@@ -712,8 +757,10 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
       hour_mode: hourMode,
       calendar_interval: calendarInterval,
       hour_range: hourRange,
-    })
-  }, [args, calendarInterval, config, editTargetPath, hourMode, hourRange, onDraftChange, scheduleType])
+    }
+    lastEmitted.current = next
+    onDraftChange(next)
+  }, [open, hydrationVersion, sensitiveOmitted, args, calendarInterval, config, editTargetPath, hourMode, hourRange, onDraftChange, scheduleType])
 
   const applyGeneratedDraft = (generated: GeneratedJobFormDraft) => {
     const parsedArgs = generated.args.trim() ? parseArguments(generated.args.trim()) : []
@@ -833,11 +880,13 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
     }
 
     setMigrationDrafting(true)
+    const generation = formGeneration.current
     try {
       const result = await runAgentPrompt({
         prompt: [
           "Convert the following Docker/OrbStack service into a launchd LaunchAgent draft.",
-          "Return valid JSON only with the same keys used by the launch agent draft workflow.",
+          "Return valid JSON only.",
+          DRAFT_SCHEMA,
           "Prefer a user LaunchAgent under ~/Library/LaunchAgents, with group/tags that make the service easy to find later.",
           "Preserve the command, ports, working directory, environment variables, and log paths when available.",
           "If the input is underspecified, choose safe defaults and explain them in notes.",
@@ -847,7 +896,8 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
         job_context: null,
         mode: "launchagent-migrate",
       })
-      const generated = parseGeneratedJobFormDraft(result.response)
+      if (generation !== formGeneration.current) return
+      const generated = parseGeneratedJobFormDraft(result.response, true)
       if (!generated) {
         throw new Error("The local model did not return a valid migration draft.")
       }
@@ -857,9 +907,9 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
       applyGeneratedDraft(generated)
       setMigrationStatus("Migration draft generated. Review before saving.")
     } catch (e) {
-      setError(String(e))
+      if (generation === formGeneration.current) setError(String(e))
     } finally {
-      setMigrationDrafting(false)
+      if (generation === formGeneration.current) setMigrationDrafting(false)
     }
   }
 
@@ -880,12 +930,14 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
     }
 
     setDrafting(true)
+    const generation = formGeneration.current
     try {
       const result = await runAgentPrompt({
         prompt: buildGeneratedDraftPrompt(draftPrompt.trim()),
         job_context: null,
         mode: "launchagent-draft",
       })
+      if (generation !== formGeneration.current) return
       const generated = parseGeneratedJobFormDraft(result.response)
       if (!generated) {
         throw new Error("The local model did not return a valid LaunchAgent draft.")
@@ -901,9 +953,9 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
       }
       applyGeneratedDraft(generated)
     } catch (e) {
-      setError(String(e))
+      if (generation === formGeneration.current) setError(String(e))
     } finally {
-      setDrafting(false)
+      if (generation === formGeneration.current) setDrafting(false)
     }
   }
 
@@ -935,21 +987,29 @@ export function JobForm({ open, onClose, onSave, editingJob, draft, onDraftChang
       working_directory: config.working_directory?.trim() || null,
     }
 
+    try {
+      if (scheduleType === "interval" && !config.start_interval) throw new Error("Interval must be a positive whole number of seconds.")
+      if (scheduleType === "calendar" && hourMode === "range") validateHourRange(hourRange.from, hourRange.to)
+      validateSchedule(finalConfig.start_interval, finalConfig.start_calendar_interval)
+    } catch (error) { setError(String(error)); return }
     setSaving(true)
+    const generation = formGeneration.current
     try {
       await onSave(finalConfig, editTargetPath ?? undefined)
+      if (generation !== formGeneration.current) return
       onDraftChange(null)
       onClose()
     } catch (e) {
-      setError(String(e))
+      if (generation === formGeneration.current) setError(String(e))
     } finally {
-      setSaving(false)
+      if (generation === formGeneration.current) setSaving(false)
     }
   }
 
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
       <DialogContent className="sm:max-w-[500px] max-h-[85vh] overflow-y-auto">
+        {sensitiveOmitted && <p role="status" className="text-sm text-amber-300">Restored drafts omit command arguments, environment values, and raw plist content. Re-enter these before saving.</p>}
         <DialogHeader>
           <DialogTitle>
             {isEditing ? "Edit Agent" : "New Agent"}

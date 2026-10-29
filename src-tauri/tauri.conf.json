@@ -17,7 +17,8 @@
         "height": 940,
         "resizable": true,
         "fullscreen": false,
-        "visible": true
+        "visible": true,
+        "minHeight": 480
       }
     ],
     "security": {

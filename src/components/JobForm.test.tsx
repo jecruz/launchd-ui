@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { render, screen, waitFor } from "@testing-library/react"
+import { act, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import {
   createEmptyJobFormDraft,
@@ -463,4 +463,61 @@ describe("JobForm draft helpers", () => {
     expect(draft.config.metadata.ports).toEqual([3002])
     expect(draft.config.metadata.template).toBeNull()
   })
+})
+
+it("rehydrates a delayed draft, switches targets, and clears on reopening an empty draft", async () => {
+  const props = { onSave: vi.fn(), onClose: vi.fn(), onDraftChange: vi.fn() }
+  const view = render(<JobForm {...props} open draft={null} />)
+  const restored = createEmptyJobFormDraft()
+  restored.config.label = "com.example.restored"
+  restored.args = "restored command"
+  restored.sensitive_fields_omitted = true
+  view.rerender(<JobForm {...props} open draft={restored} />)
+  expect(await screen.findByDisplayValue("com.example.restored")).toBeInTheDocument()
+  expect(screen.getByText(/Restored drafts omit/)).toBeInTheDocument()
+  const next = createEmptyJobFormDraft()
+  next.config.label = "com.example.next"
+  view.rerender(<JobForm {...props} open draft={next} />)
+  expect(await screen.findByDisplayValue("com.example.next")).toBeInTheDocument()
+  expect(screen.queryByDisplayValue("restored command")).not.toBeInTheDocument()
+  view.rerender(<JobForm {...props} open={false} draft={null} />)
+  view.rerender(<JobForm {...props} open draft={null} />)
+  expect(screen.queryByDisplayValue("com.example.next")).not.toBeInTheDocument()
+  await act(async () => undefined)
+  view.unmount()
+})
+
+it("does not close or clear a newly selected draft when an older save finishes", async () => {
+  let finish!: () => void
+  const onSave = vi.fn(() => new Promise<void>((resolve) => { finish = resolve }))
+  const props = { onSave, onClose: vi.fn(), onDraftChange: vi.fn() }
+  const old = createEmptyJobFormDraft()
+  old.config.label = "com.example.old"
+  const view = render(<JobForm {...props} open draft={old} />)
+  await userEvent.setup().click(screen.getByRole("button", { name: "Create" }))
+  await waitFor(() => expect(onSave).toHaveBeenCalled())
+  const next = createEmptyJobFormDraft()
+  next.config.label = "com.example.next"
+  view.rerender(<JobForm {...props} open draft={next} />)
+  await act(async () => finish())
+  await waitFor(() => expect(screen.getByDisplayValue("com.example.next")).toBeInTheDocument())
+  expect(props.onClose).not.toHaveBeenCalled()
+  expect(props.onDraftChange).not.toHaveBeenCalledWith(null)
+})
+
+it.each(["toString", "constructor", "__proto__"])("does not treat inherited template %s as a preset", (template) => {
+  const config = createEmptyJobFormDraft().config
+  const job: LaunchdJob = { label: "com.example.custom", plist_path: "/Users/test/Library/LaunchAgents/com.example.custom.plist", source: "UserAgent", status: "Loaded", pid: null, last_exit_code: 0, last_run_at: null, plist: { ...config, label: "com.example.custom", metadata: { ...config.metadata, template } } }
+  const repaired = createRepairJobFormDraftFromJob(job)
+  expect(repaired.config.metadata.health_check_url).toBeNull()
+  expect(repaired.config.metadata.ports).toEqual([])
+})
+
+it("honors explicit empty repair fields rather than restoring previous values", () => {
+  const config = createEmptyJobFormDraft().config
+  const job: LaunchdJob = { label: "com.example.api", plist_path: "/Users/test/Library/LaunchAgents/com.example.api.plist", source: "UserAgent", status: "Loaded", pid: null, last_exit_code: 0, last_run_at: null, plist: { ...config, label: "com.example.api", metadata: { ...config.metadata, template: "api", health_check_url: "http://127.0.0.1:8001/health", ports: [8001] } } }
+  const repaired = createRepairJobFormDraftFromJob(job, config.metadata)
+  expect(repaired.config.metadata.health_check_url).toBeNull()
+  expect(repaired.config.metadata.template).toBeNull()
+  expect(repaired.config.metadata.ports).toEqual([])
 })

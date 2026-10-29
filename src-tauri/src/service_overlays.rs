@@ -1,7 +1,9 @@
 use crate::error::AppError;
 use crate::types::LaunchControlMetadata;
+use crate::{plist_util, state_io, user_agent};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const APP_DIR_NAME: &str = "Daemonic";
 const LEGACY_APP_DIR_NAME: &str = "launchd-ui";
@@ -21,82 +23,269 @@ fn legacy_app_settings_dir() -> Result<PathBuf, AppError> {
     Ok(dir)
 }
 
-fn overrides_file() -> Result<PathBuf, AppError> {
-    Ok(app_settings_dir()?.join(SERVICE_OVERRIDES_FILE_NAME))
-}
-
 fn legacy_overrides_file() -> Result<PathBuf, AppError> {
     Ok(legacy_app_settings_dir()?.join(SERVICE_OVERRIDES_FILE_NAME))
 }
 
-pub fn load_service_overrides() -> Result<HashMap<String, LaunchControlMetadata>, AppError> {
-    let primary = overrides_file()?;
-    let legacy = legacy_overrides_file()?;
-    match std::fs::read_to_string(&primary) {
-        Ok(contents) => serde_json::from_str(&contents)
-            .map_err(|e| AppError::AgentRuntime(format!("failed to parse {primary:?}: {e}"))),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            match std::fs::read_to_string(&legacy) {
-                Ok(contents) => serde_json::from_str(&contents).map_err(|e| {
-                    AppError::AgentRuntime(format!("failed to parse {legacy:?}: {e}"))
-                }),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
-                Err(err) => Err(AppError::AgentRuntime(format!(
-                    "failed to read {legacy:?}: {err}"
-                ))),
-            }
-        }
-        Err(err) => Err(AppError::AgentRuntime(format!(
-            "failed to read {primary:?}: {err}"
-        ))),
+/// Complete records support explicit clears; old records retain inheritance semantics.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ServiceOverride {
+    #[serde(default)]
+    pub complete: bool,
+    #[serde(flatten)]
+    pub metadata: LaunchControlMetadata,
+}
+
+type Overrides = HashMap<String, ServiceOverride>;
+const JOURNAL: &str = "pending-plist-transaction.json";
+
+#[derive(Serialize, Deserialize)]
+struct Journal {
+    path: String,
+    label: String,
+    before: Option<Vec<u8>>,
+    after: Option<Vec<u8>>,
+    overrides: Overrides,
+}
+
+fn load_at(directory: &Path, legacy: Option<&Path>) -> Result<Overrides, AppError> {
+    if let Some(value) = state_io::read(&directory.join(SERVICE_OVERRIDES_FILE_NAME))? {
+        return Ok(value);
+    }
+    match legacy {
+        Some(path) => Ok(state_io::read(path)?.unwrap_or_default()),
+        None => Ok(HashMap::new()),
     }
 }
 
-pub fn save_service_overrides(
-    overrides: &HashMap<String, LaunchControlMetadata>,
-) -> Result<(), AppError> {
-    let path = overrides_file()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            AppError::AgentRuntime(format!(
-                "failed to create overrides directory {parent:?}: {e}"
-            ))
-        })?;
-    }
-    let json = serde_json::to_string_pretty(overrides)
-        .map_err(|e| AppError::AgentRuntime(format!("failed to serialize overrides: {e}")))?;
-    std::fs::write(&path, json)
-        .map_err(|e| AppError::AgentRuntime(format!("failed to write {path:?}: {e}")))
-}
-
-pub fn upsert_service_override(
-    plist_path: &str,
-    metadata: &LaunchControlMetadata,
-) -> Result<(), AppError> {
-    let mut overrides = load_service_overrides()?;
-    overrides.insert(plist_path.to_string(), metadata.clone());
-    save_service_overrides(&overrides)
-}
-
-pub fn remove_service_override(plist_path: &str) -> Result<(), AppError> {
-    let mut overrides = load_service_overrides()?;
-    if overrides.remove(plist_path).is_some() {
-        save_service_overrides(&overrides)?;
+fn validate_target(root: &Path, path: &str, label: &str) -> Result<(), AppError> {
+    user_agent::validate_label(label)?;
+    let name = format!("{label}.plist");
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if Path::new(path) != root.join(&name) && Path::new(path) != canonical.join(&name) {
+        return Err(AppError::Plist(
+            "Transaction target does not match its user-agent label.".into(),
+        ));
     }
     Ok(())
+}
+
+fn remove_journal(directory: &Path) -> Result<(), AppError> {
+    std::fs::remove_file(directory.join(JOURNAL))?;
+    std::fs::File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+fn recover_at(root: &Path, directory: &Path) -> Result<(), AppError> {
+    let Some(journal): Option<Journal> = state_io::read(&directory.join(JOURNAL))? else {
+        return Ok(());
+    };
+    validate_target(root, &journal.path, &journal.label)?;
+    for bytes in [&journal.before, &journal.after].into_iter().flatten() {
+        if plist_util::parse_plist_bytes(bytes)?.label != journal.label {
+            return Err(AppError::Plist("Invalid transaction label.".into()));
+        }
+    }
+    match std::fs::symlink_metadata(&journal.path) {
+        Ok(_) => {
+            let current =
+                user_agent::load_in(root, Path::new(&journal.path), Some(&journal.label))?;
+            let bytes = current.original_bytes()?;
+            if Some(&bytes) != journal.before.as_ref() && Some(&bytes) != journal.after.as_ref() {
+                return Err(AppError::Plist("Pending transaction conflicts with an external edit; recovery requires operator review.".into()));
+            }
+            match journal.before.as_ref() {
+                Some(before) if *before != bytes => current.write(before)?,
+                None => current.remove()?,
+                _ => {}
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(before) = journal.before.as_ref() {
+                user_agent::create_in(root, &journal.label, before)?;
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
+    state_io::write(
+        &directory.join(SERVICE_OVERRIDES_FILE_NAME),
+        &journal.overrides,
+    )?;
+    remove_journal(directory)
+}
+
+struct Change<'a> {
+    path: &'a str,
+    label: &'a str,
+    after: Option<&'a [u8]>,
+    metadata: Option<&'a LaunchControlMetadata>,
+    create: bool,
+}
+
+fn transact_at(
+    root: &Path,
+    directory: &Path,
+    legacy: Option<&Path>,
+    change: Change<'_>,
+    persist: impl FnOnce(&Path, &Overrides) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let Change {
+        path,
+        label,
+        after,
+        metadata,
+        create,
+    } = change;
+    validate_target(root, path, label)?;
+    state_io::locked(directory, || {
+        recover_at(root, directory)?;
+        let before = if create {
+            match std::fs::symlink_metadata(path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+                Ok(_) => return Err(AppError::Plist("A job already exists at this path.".into())),
+            }
+        } else {
+            Some(user_agent::load_in(root, Path::new(path), Some(label))?.original_bytes()?)
+        };
+        if let Some(after) = after {
+            if plist_util::parse_plist_bytes(after)?.label != label {
+                return Err(AppError::Plist(
+                    "Replacement label must match its target.".into(),
+                ));
+            }
+        }
+        let overrides = load_at(directory, legacy)?;
+        let journal = Journal {
+            path: path.into(),
+            label: label.into(),
+            before,
+            after: after.map(Vec::from),
+            overrides: overrides.clone(),
+        };
+        state_io::write(&directory.join(JOURNAL), &journal)?;
+        let result = (|| {
+            match after {
+                Some(bytes) if create => {
+                    user_agent::create_in(root, label, bytes)?;
+                }
+                Some(bytes) => {
+                    user_agent::load_in(root, Path::new(path), Some(label))?.write(bytes)?
+                }
+                None => user_agent::load_in(root, Path::new(path), Some(label))?.remove()?,
+            }
+            let mut updated = overrides;
+            match metadata {
+                Some(metadata) => {
+                    updated.insert(
+                        path.into(),
+                        ServiceOverride {
+                            complete: true,
+                            metadata: metadata.clone(),
+                        },
+                    );
+                }
+                None => {
+                    updated.remove(path);
+                }
+            }
+            persist(&directory.join(SERVICE_OVERRIDES_FILE_NAME), &updated)?;
+            remove_journal(directory)
+        })();
+        if let Err(error) = result {
+            if recover_at(root, directory).is_err() {
+                return Err(AppError::Plist("Update failed and recovery remains pending; further writes are blocked until recovery succeeds.".into()));
+            }
+            return Err(error);
+        }
+        Ok(())
+    })
+}
+
+/// Recover interrupted file/overlay updates before displaying or modifying jobs.
+pub fn recover_pending() -> Result<(), AppError> {
+    let directory = app_settings_dir()?;
+    state_io::locked(&directory, || {
+        recover_at(&plist_util::get_user_agents_dir(), &directory)
+    })
+}
+
+/// Atomically publish a plist and recover its paired overlay on failure or restart.
+pub fn transact_plist(
+    path: &str,
+    label: &str,
+    after: Option<&[u8]>,
+    metadata: Option<&LaunchControlMetadata>,
+    create: bool,
+) -> Result<(), AppError> {
+    transact_at(
+        &plist_util::get_user_agents_dir(),
+        &app_settings_dir()?,
+        Some(&legacy_overrides_file()?),
+        Change {
+            path,
+            label,
+            after,
+            metadata,
+            create,
+        },
+        state_io::write,
+    )
+}
+
+/// Load metadata snapshots after recovering any interrupted transaction.
+pub fn load_service_overrides() -> Result<Overrides, AppError> {
+    let directory = app_settings_dir()?;
+    state_io::locked(&directory, || {
+        recover_at(&plist_util::get_user_agents_dir(), &directory)?;
+        load_at(&directory, Some(&legacy_overrides_file()?))
+    })
+}
+
+/// Update only probe result fields while retaining any concurrently edited metadata.
+pub fn record_health(
+    path: &str,
+    status: &str,
+    detail: &str,
+    checked_at: &str,
+) -> Result<(), AppError> {
+    let directory = app_settings_dir()?;
+    state_io::locked(&directory, || {
+        recover_at(&plist_util::get_user_agents_dir(), &directory)?;
+        let mut overrides = load_at(&directory, Some(&legacy_overrides_file()?))?;
+        let base = plist_util::parse_plist(path)?.metadata;
+        let mut metadata = merge_metadata(&base, overrides.get(path));
+        metadata.health_status = Some(status.into());
+        metadata.health_detail = Some(detail.into());
+        metadata.last_health_check_at = Some(checked_at.into());
+        overrides.insert(
+            path.into(),
+            ServiceOverride {
+                complete: true,
+                metadata,
+            },
+        );
+        state_io::write(&directory.join(SERVICE_OVERRIDES_FILE_NAME), &overrides)
+    })
 }
 
 fn merge_option<T: Clone>(base: Option<T>, overlay: Option<T>) -> Option<T> {
     overlay.or(base)
 }
 
+/// Merge legacy partial records while honoring explicit clears in new snapshots.
 pub fn merge_metadata(
     base: &LaunchControlMetadata,
-    overlay: Option<&LaunchControlMetadata>,
+    overlay: Option<&ServiceOverride>,
 ) -> LaunchControlMetadata {
     let Some(overlay) = overlay else {
         return base.clone();
     };
+
+    if overlay.complete {
+        return overlay.metadata.clone();
+    }
+    let overlay = &overlay.metadata;
 
     let tags = if overlay.tags.is_empty() {
         base.tags.clone()
@@ -135,6 +324,7 @@ pub fn merge_metadata(
     }
 }
 
+/// Merge metadata for one plist from the recovered application snapshot.
 pub fn merge_metadata_by_path(
     plist_path: &str,
     base: &LaunchControlMetadata,
@@ -146,6 +336,112 @@ pub fn merge_metadata_by_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture(root: &Path, label: &str, group: &str) -> (String, Vec<u8>) {
+        std::fs::create_dir_all(root).unwrap();
+        let config = serde_json::from_value(
+            serde_json::json!({"label": label, "raw_xml": "", "metadata": {"group": group}}),
+        )
+        .unwrap();
+        let bytes = plist_util::serialize_plist(&config).unwrap();
+        let path = root.join(format!("{label}.plist"));
+        std::fs::write(&path, &bytes).unwrap();
+        (path.to_string_lossy().into_owned(), bytes)
+    }
+
+    #[test]
+    fn complete_records_clear_fields_while_legacy_records_inherit() {
+        let base = LaunchControlMetadata {
+            group: Some("base".into()),
+            ports: vec![42],
+            ..Default::default()
+        };
+        let legacy: ServiceOverride =
+            serde_json::from_value(serde_json::json!({"tags": []})).unwrap();
+        assert_eq!(merge_metadata(&base, Some(&legacy)), base);
+        let complete = ServiceOverride {
+            complete: true,
+            metadata: Default::default(),
+        };
+        assert_eq!(
+            merge_metadata(&base, Some(&complete)),
+            LaunchControlMetadata::default()
+        );
+    }
+
+    #[test]
+    fn rolls_back_replace_create_and_delete_when_overlay_persistence_fails() {
+        for operation in ["replace", "create", "delete"] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("LaunchAgents");
+            let directory = temp.path().join("state");
+            let (path, before) = fixture(&root, "safe", "before");
+            let mut config = plist_util::parse_plist_bytes(&before).unwrap();
+            config.metadata.group = Some("after".into());
+            let after = plist_util::serialize_plist(&config).unwrap();
+            let creating = operation == "create";
+            if creating {
+                std::fs::remove_file(&path).unwrap();
+            }
+            let result = transact_at(
+                &root,
+                &directory,
+                None,
+                Change {
+                    path: &path,
+                    label: "safe",
+                    after: if operation == "delete" {
+                        None
+                    } else {
+                        Some(&after)
+                    },
+                    metadata: Some(&config.metadata),
+                    create: creating,
+                },
+                |_, _| Err(AppError::AgentRuntime("Injected overlay failure".into())),
+            );
+            assert!(result.is_err());
+            if creating {
+                assert!(!Path::new(&path).exists());
+            } else {
+                assert_eq!(std::fs::read(path).unwrap(), before);
+            }
+            assert!(!directory.join(JOURNAL).exists());
+            assert!(load_at(&directory, None).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn recovers_an_interrupted_transaction_and_preserves_external_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("LaunchAgents");
+        let directory = temp.path().join("state");
+        let (path, before) = fixture(&root, "safe", "before");
+        let mut config = plist_util::parse_plist_bytes(&before).unwrap();
+        config.metadata.group = Some("after".into());
+        let after = plist_util::serialize_plist(&config).unwrap();
+        let journal = Journal {
+            path: path.clone(),
+            label: "safe".into(),
+            before: Some(before.clone()),
+            after: Some(after.clone()),
+            overrides: HashMap::new(),
+        };
+        state_io::save(&directory.join(JOURNAL), &journal).unwrap();
+        user_agent::load_in(&root, Path::new(&path), None)
+            .unwrap()
+            .write(&after)
+            .unwrap();
+        state_io::locked(&directory, || recover_at(&root, &directory)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        state_io::save(&directory.join(JOURNAL), &journal).unwrap();
+        config.metadata.group = Some("external".into());
+        let external = plist_util::serialize_plist(&config).unwrap();
+        std::fs::write(&path, &external).unwrap();
+        assert!(state_io::locked(&directory, || recover_at(&root, &directory)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), external);
+        assert!(directory.join(JOURNAL).exists());
+    }
 
     #[test]
     fn merge_metadata_prefers_overlay_fields() {
@@ -180,7 +476,13 @@ mod tests {
             last_health_check_at: Some("2".to_string()),
         };
 
-        let merged = merge_metadata(&base, Some(&overlay));
+        let merged = merge_metadata(
+            &base,
+            Some(&ServiceOverride {
+                complete: false,
+                metadata: overlay,
+            }),
+        );
 
         assert_eq!(merged.group, Some("CAISS System".to_string()));
         assert_eq!(merged.tags, vec!["caiss".to_string(), "api".to_string()]);

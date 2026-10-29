@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react"
+import { useState, useCallback, useRef, useEffect } from "react"
 import { readLogFile } from "@/lib/invoke"
 
 function stripAnsiAndControl(text: string): string {
@@ -25,21 +25,27 @@ export function useLogs(): UseLogsReturn {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const request = useRef(0)
+  useEffect(() => () => { request.current += 1 }, [])
   const fetchLog = useCallback(async (path: string, tailLines?: number) => {
+    const generation = ++request.current
+    setContent("")
+    setModifiedAt(null)
     setLoading(true)
     setError(null)
     try {
       const result = await readLogFile(path, tailLines)
+      if (generation !== request.current) return
       setContent(stripAnsiAndControl(result.content))
-      setModifiedAt(
-        result.modified_at ? new Date(Number(result.modified_at)) : null
-      )
+      const modified = result.modified_at ? new Date(Number(result.modified_at)) : null
+      setModifiedAt(modified && Number.isFinite(modified.getTime()) ? modified : null)
     } catch (e) {
+      if (generation !== request.current) return
       setError(String(e))
       setContent("")
       setModifiedAt(null)
     } finally {
-      setLoading(false)
+      if (generation === request.current) setLoading(false)
     }
   }, [])
 

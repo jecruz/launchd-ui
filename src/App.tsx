@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { createPreferenceWriter } from "@/lib/preference-writer"
+import { fitWindow } from "@/lib/window-geometry"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { listen } from "@tauri-apps/api/event"
 import { hide as hideApp, show as showApp, setDockVisibility } from "@tauri-apps/api/app"
-import { getCurrentWindow, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/window"
+import { getCurrentWindow, PhysicalPosition, PhysicalSize, availableMonitors } from "@tauri-apps/api/window"
 import { ArrowUpRight, Bot, Layers3, Plus, RefreshCw, Shield, Sparkles, TerminalSquare, Activity } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -25,6 +27,7 @@ import { AgentPanel } from "@/components/AgentPanel"
 import { useJobs } from "@/hooks/useJobs"
 import { deriveHealthText } from "@/lib/health"
 import {
+  finishQuit,
   createJob,
   deleteJob,
   getAppPreferences,
@@ -151,6 +154,14 @@ function sameWindowGeometry(
 function App() {
   const [preferences, setPreferences] = useState<AppPreferences>(defaultPreferences)
   const [preferencesReady, setPreferencesReady] = useState(false)
+  const [preferencesWritable, setPreferencesWritable] = useState(false)
+  const [preferenceError, setPreferenceError] = useState<string | null>(null)
+  const preferenceWriter = useMemo(() => createPreferenceWriter(saveAppPreferences, setPreferenceError), [])
+  const editGeneration = useRef(0)
+  const formGeneration = useRef(0)
+  const writableRef = useRef(preferencesWritable)
+  writableRef.current = preferencesWritable
+  const [reloadPreferences, setReloadPreferences] = useState(0)
   const [agentMode, setAgentMode] = useState<AgentMode>("approval")
   const {
     jobs,
@@ -198,6 +209,8 @@ function App() {
       try {
         const saved = normalizePreferences(await getAppPreferences())
         if (cancelled) return
+        setPreferencesWritable(true)
+        setPreferenceError(null)
         setPreferences(saved)
         setAgentMode(saved.agent_mode)
         setSearch(saved.search)
@@ -210,9 +223,10 @@ function App() {
         setSelectedPlistPath(saved.selected_plist_path)
         setJobFormDraft(normalizeJobFormDraft(saved.job_form_draft))
         setWindowGeometry(saved.window_geometry)
-      } catch {
+      } catch (error) {
         if (!cancelled) {
-          setPreferences(defaultPreferences)
+          setPreferencesWritable(false)
+          setPreferenceError(`Preferences could not be loaded; autosave is paused to protect the saved file: ${String(error)}`)
         }
       } finally {
         if (!cancelled) {
@@ -226,23 +240,16 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [setGroupFilter, setSearch, setSourceFilter, setSortKey, setSortDirection])
+  }, [reloadPreferences, setGroupFilter, setSearch, setSourceFilter, setSortKey, setSortDirection])
 
   useEffect(() => {
-    if (!preferencesReady) return
-    void saveAppPreferences({
-      search,
-      source_filter: sourceFilter,
-      group_filter: groupFilter,
-      sort_key: sortKey,
-      sort_direction: sortDirection,
-      agent_mode: agentMode,
-      detail_open: detailOpen,
-      form_open: formOpen,
-      selected_plist_path: selectedPlistPath,
-      job_form_draft: jobFormDraft,
+    if (!preferencesReady || !preferencesWritable) return
+    preferenceWriter.schedule({
+      search, source_filter: sourceFilter, group_filter: groupFilter, sort_key: sortKey,
+      sort_direction: sortDirection, agent_mode: agentMode, detail_open: detailOpen,
+      form_open: formOpen, selected_plist_path: selectedPlistPath, job_form_draft: jobFormDraft,
       window_geometry: windowGeometry,
-    }).catch(() => undefined)
+    })
     setPreferences({
       search,
       source_filter: sourceFilter,
@@ -262,6 +269,8 @@ function App() {
     formOpen,
     jobFormDraft,
     preferencesReady,
+    preferencesWritable,
+    preferenceWriter,
     selectedPlistPath,
     windowGeometry,
     search,
@@ -276,10 +285,9 @@ function App() {
       setActionError(null)
       try {
         await action()
-        await refresh()
       } catch (e) {
         setActionError(String(e))
-      }
+      } finally { await refresh() }
     },
     [refresh]
   )
@@ -305,11 +313,18 @@ function App() {
 
       unlistenClose = await currentWindow.onCloseRequested(async (event) => {
         event.preventDefault()
+        try { await preferenceWriter.flush() } catch { return }
         await hideApp().catch(() => undefined)
         await currentWindow.hide().catch(() => undefined)
       })
 
       unlistenCommand = await listen<string>(TRAY_COMMAND_EVENT, async (event) => {
+        if (event.payload === "quit") {
+          if (!writableRef.current && !window.confirm("Preferences could not be loaded. Quit and discard this session's unsaved preference edits?")) return
+          try { await preferenceWriter.flush(); await finishQuit() }
+          catch { await openControlCenter() }
+          return
+        }
         if (event.payload === "open") {
           await openControlCenter()
           return
@@ -325,7 +340,7 @@ function App() {
           await openControlCenter()
           setEditingJob(null)
           setJobFormDraft(createEmptyJobFormDraft())
-          setFormKey((k) => k + 1)
+          formGeneration.current += 1; setFormKey((k) => k + 1)
           setFormOpen(true)
         }
       })
@@ -337,7 +352,7 @@ function App() {
       unlistenCommand?.()
       unlistenClose?.()
     }
-  }, [openControlCenter, refresh])
+  }, [openControlCenter, preferenceWriter, refresh])
 
   useEffect(() => {
     if (!preferencesReady) return
@@ -348,37 +363,19 @@ function App() {
     let cancelled = false
 
     const restoreAndTrackWindow = async () => {
-      let resolvedGeometry = windowGeometry
-
-    if (!resolvedGeometry) {
-      const [position, size] = await Promise.all([
-        currentWindow.outerPosition().catch(() => null),
-        currentWindow.innerSize().catch(() => null),
-      ])
-      if (position && size) {
-        resolvedGeometry = {
-          x: Math.round(position.x),
-          y: Math.round(position.y),
-          width: Math.round(size.width),
-          height: Math.max(Math.round(size.height), MIN_WINDOW_HEIGHT),
-        }
+      const monitors = await availableMonitors().catch(() => [])
+      if (cancelled) return
+      const areas = monitors.map((monitor) => ({ x: monitor.workArea.position.x, y: monitor.workArea.position.y, width: monitor.workArea.size.width, height: monitor.workArea.size.height }))
+      const resolvedGeometry = fitWindow(windowGeometry, areas)
+      if (resolvedGeometry) {
+        await currentWindow.setSize(new PhysicalSize(resolvedGeometry.width, resolvedGeometry.height))
+        if (cancelled) return
+        await currentWindow.setPosition(new PhysicalPosition(resolvedGeometry.x, resolvedGeometry.y))
+        if (cancelled) return
+        setWindowGeometry(resolvedGeometry)
+      } else {
+        await currentWindow.center().catch(() => undefined)
       }
-    } else {
-      resolvedGeometry = {
-        ...resolvedGeometry,
-        height: Math.max(resolvedGeometry.height, MIN_WINDOW_HEIGHT),
-      }
-    }
-
-    if (resolvedGeometry) {
-      await currentWindow
-        .setPosition(new PhysicalPosition(resolvedGeometry.x, resolvedGeometry.y))
-        .catch(() => undefined)
-      await currentWindow
-        .setSize(new PhysicalSize(resolvedGeometry.width, resolvedGeometry.height))
-        .catch(() => undefined)
-      setWindowGeometry(resolvedGeometry)
-    }
 
       unlistenMoved = await currentWindow.onMoved(async ({ payload }) => {
         if (cancelled) return
@@ -409,7 +406,7 @@ function App() {
       await openControlCenter()
     }
 
-    void restoreAndTrackWindow()
+    void restoreAndTrackWindow().catch((error) => setActionError(`Window restoration failed: ${String(error)}`))
 
     return () => {
       cancelled = true
@@ -419,6 +416,7 @@ function App() {
   }, [openControlCenter, preferencesReady])
 
   const handleSelect = useCallback((job: JobListEntry) => {
+    editGeneration.current += 1
     setSelectedPlistPath(job.plist_path)
     setDetailOpen(true)
   }, [])
@@ -426,7 +424,7 @@ function App() {
   const handleEdit = useCallback((job: LaunchdJob) => {
     setEditingJob(job)
     setJobFormDraft(createJobFormDraftFromJob(job))
-    setFormKey((k) => k + 1)
+    formGeneration.current += 1; setFormKey((k) => k + 1)
     setFormOpen(true)
     setDetailOpen(false)
   }, [])
@@ -437,7 +435,7 @@ function App() {
       setJobFormDraft(
         createRepairJobFormDraftFromJob(job, diagnosis?.suggested_metadata ?? null)
       )
-      setFormKey((k) => k + 1)
+      formGeneration.current += 1; setFormKey((k) => k + 1)
       setFormOpen(true)
       setDetailOpen(false)
     },
@@ -447,22 +445,25 @@ function App() {
   const handleEditFromList = useCallback(async (job: JobListEntry) => {
     if (job.source !== "UserAgent") return
     setActionError(null)
+    const generation = ++editGeneration.current
     try {
       const detail = await getJobDetail(job.plist_path)
+      if (generation !== editGeneration.current) return
       handleEdit(detail)
     } catch (e) {
-      setActionError(String(e))
+      if (generation === editGeneration.current) setActionError(String(e))
     }
   }, [handleEdit])
 
   const handleSave = useCallback(
     async (config: PlistConfig, plistPath?: string) => {
+      const generation = formGeneration.current
       if (plistPath) {
         await saveJob(plistPath, config)
       } else {
         await createJob(config.label, config)
       }
-      setJobFormDraft(null)
+      if (generation === formGeneration.current) setJobFormDraft(null)
       await refresh()
     },
     [refresh]
@@ -524,21 +525,19 @@ function App() {
       }
 
       setActionError(null)
+      const failures: string[] = []
       try {
         for (const target of targets) {
-          if (action === "start") {
-            await startJob(target.plist_path)
-          } else if (action === "stop") {
-            await stopJob(target.plist_path)
-          } else if (action === "restart") {
-            await restartJob(target.plist_path)
-          } else {
-            await kickstartJob(target.label, target.plist_path)
-          }
+          try {
+            if (action === "start") await startJob(target.plist_path)
+            else if (action === "stop") await stopJob(target.plist_path)
+            else if (action === "restart") await restartJob(target.plist_path)
+            else await kickstartJob(target.label, target.plist_path)
+          } catch (error) { failures.push(`${target.label}: ${String(error)}`) }
         }
+      } finally {
         await refresh()
-      } catch (e) {
-        setActionError(String(e))
+        if (failures.length) setActionError(`${failures.length} of ${targets.length} actions failed: ${failures.join("; ")}`)
       }
     },
     [jobs, refresh]
@@ -600,7 +599,7 @@ function App() {
                 onClick={() => {
                   setEditingJob(null)
                   setJobFormDraft(createEmptyJobFormDraft())
-                  setFormKey((k) => k + 1)
+                  formGeneration.current += 1; setFormKey((k) => k + 1)
                   setFormOpen(true)
                 }}
               >
@@ -673,13 +672,14 @@ function App() {
             </div>
           </section>
 
-          {(error || actionError) && (
+          {(error || actionError || preferenceError) && (
             <div className="space-y-2">
               {error && (
                 <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200 shadow-lg shadow-rose-950/20">
                   {error}
                 </div>
               )}
+              {preferenceError && <p role="alert">{preferenceError} <Button onClick={() => { if (preferencesWritable) void preferenceWriter.flush().catch(() => undefined); else if (window.confirm("Reload saved preferences and replace this session's in-memory preference edits?")) setReloadPreferences((value) => value + 1) }}>{preferencesWritable ? "Retry pending save" : "Reload saved preferences"}</Button></p>}
               {actionError && (
                 <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200 shadow-lg shadow-rose-950/20">
                   {actionError}
@@ -853,6 +853,9 @@ function App() {
 
               <div className="p-3 sm:p-4">
                 <JobList
+                  sortKey={sortKey}
+                  sortDirection={sortDirection}
+                  onSortChange={(key, direction) => { setSortKey(key); setSortDirection(direction) }}
                   jobs={filteredJobs}
                   loading={loading}
                   onStart={(job) => handleAction(() => startJob(job.plist_path))}
@@ -1015,6 +1018,7 @@ function App() {
           key={formKey}
           open={formOpen}
           onClose={() => {
+            formGeneration.current += 1
             setFormOpen(false)
             setEditingJob(null)
           }}

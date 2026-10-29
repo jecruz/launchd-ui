@@ -5,8 +5,11 @@ mod health_probe;
 mod launchctl;
 mod plist_util;
 mod service_overlays;
+mod state_io;
 mod types;
 mod user_agent;
+
+static QUIT_APPROVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 use tauri::image::Image;
 use tauri::menu::{MenuBuilder, MenuItem};
@@ -34,6 +37,8 @@ fn tray_icon_image(app: &tauri::App) -> Image<'static> {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            user_agent::prepare_log_directory()?;
+            service_overlays::recover_pending()?;
             #[cfg(target_os = "macos")]
             {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -88,7 +93,7 @@ pub fn run() {
                     let _ = app_handle.emit(TRAY_COMMAND_EVENT, "new-agent");
                 }
                 "quit" => {
-                    std::process::exit(0);
+                    let _ = app_handle.emit(TRAY_COMMAND_EVENT, "quit");
                 }
                 _ => {}
             });
@@ -96,6 +101,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::finish_quit,
             commands::list_jobs,
             commands::get_job_detail,
             commands::start_job,
@@ -123,6 +129,14 @@ pub fn run() {
             commands::run_agent_prompt,
             commands::apply_approved_agent_action,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if !QUIT_APPROVED.load(std::sync::atomic::Ordering::SeqCst) {
+                    api.prevent_exit();
+                    let _ = app.emit(TRAY_COMMAND_EVENT, "quit");
+                }
+            }
+        });
 }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import type { JobListEntry, JobSource, JobSortKey, SortDirection } from "@/types"
 import { listJobs } from "@/lib/invoke"
 
@@ -60,21 +60,24 @@ export function useJobs(initialState?: {
     initialState?.sortKey,
   ])
 
+  const request = useRef(0)
   const refresh = useCallback(async () => {
+    const generation = ++request.current
     setLoading(true)
     setError(null)
     try {
       const result = await listJobs()
-      setJobs(result)
+      if (generation === request.current) setJobs(result)
     } catch (e) {
-      setError(String(e))
+      if (generation === request.current) setError(String(e))
     } finally {
-      setLoading(false)
+      if (generation === request.current) setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    refresh()
+    void refresh()
+    return () => { request.current += 1 }
   }, [refresh])
 
   const filteredJobs = jobs.filter((job) => {

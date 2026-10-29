@@ -3,11 +3,12 @@ use crate::plist_util;
 use crate::types::PlistConfig;
 use std::ffi::CString;
 use std::fs::{File, Metadata};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn rejected() -> AppError {
     AppError::Plist(
@@ -144,6 +145,54 @@ fn open_directory(path: &Path) -> Result<File, AppError> {
     Ok(directory)
 }
 
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn atomic_publish(
+    directory: &File,
+    target: &CString,
+    bytes: &[u8],
+    exclusive: bool,
+    validate: impl FnOnce() -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let name = CString::new(format!(
+        ".daemonic-{}-{}.tmp",
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ))
+    .map_err(|_| rejected())?;
+    let mut file = open_at(
+        directory,
+        &name,
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+    )?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        validate()?;
+        // SAFETY: both names are single components of the same open directory.
+        // RENAME_EXCL prevents creation from overwriting a concurrently created job.
+        if unsafe {
+            libc::renameatx_np(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                directory.as_raw_fd(),
+                target.as_ptr(),
+                if exclusive { libc::RENAME_EXCL } else { 0 },
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        directory.sync_all()?;
+        Ok(())
+    })();
+    // SAFETY: cleanup refers only to the exclusive temporary entry created above.
+    unsafe {
+        libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0);
+    }
+    result
+}
+
 fn same_file(a: &Metadata, b: &Metadata) -> bool {
     a.dev() == b.dev()
         && a.ino() == b.ino()
@@ -194,15 +243,25 @@ impl CheckedAgent {
 
     /// Replace bytes through a descriptor matching the originally validated inode.
     pub fn write(&self, bytes: &[u8]) -> Result<(), AppError> {
+        atomic_publish(&self.directory, &self.name, bytes, false, || {
+            self.ensure_current()
+        })
+    }
+
+    /// Read the original bounded snapshot through its retained descriptor.
+    pub fn original_bytes(&self) -> Result<Vec<u8>, AppError> {
         self.ensure_current()?;
-        let mut file = open_at(&self.directory, &self.name, libc::O_WRONLY)?;
-        if !same_file(&self.identity, &file.metadata()?) {
+        let mut file = self._file.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 1024 * 1024 {
             return Err(rejected());
         }
-        file.set_len(0)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        Ok(())
+        self.ensure_current()?;
+        Ok(bytes)
     }
 
     /// Unlink a checked entry relative to the validated directory descriptor.
@@ -217,7 +276,12 @@ impl CheckedAgent {
     }
 }
 
-fn load_in(root: &Path, path: &Path, label: Option<&str>) -> Result<CheckedAgent, AppError> {
+/// Load from an explicitly trusted root, including isolated transaction fixtures.
+pub(crate) fn load_in(
+    root: &Path,
+    path: &Path,
+    label: Option<&str>,
+) -> Result<CheckedAgent, AppError> {
     let path = path_in(root, path, true)?;
     let directory = open_directory(path.parent().ok_or_else(rejected)?)?;
     let name =
@@ -259,12 +323,8 @@ pub fn load(path: &str, label: Option<&str>) -> Result<CheckedAgent, AppError> {
     load_in(&plist_util::get_user_agents_dir(), Path::new(path), label)
 }
 
-/// Create a new safe entry relative to its validated LaunchAgents directory.
-pub fn create(label: &str, bytes: &[u8]) -> Result<String, AppError> {
-    create_in(&plist_util::get_user_agents_dir(), label, bytes)
-}
-
-fn create_in(root: &Path, label: &str, bytes: &[u8]) -> Result<String, AppError> {
+/// Create within an explicitly trusted root using atomic exclusive publication.
+pub(crate) fn create_in(root: &Path, label: &str, bytes: &[u8]) -> Result<String, AppError> {
     validate_label(label)?;
     if plist_util::parse_plist_bytes(bytes)?.label != label {
         return Err(rejected());
@@ -284,15 +344,43 @@ fn create_in(root: &Path, label: &str, bytes: &[u8]) -> Result<String, AppError>
     let directory = open_directory(path.parent().ok_or_else(rejected)?)?;
     let name =
         CString::new(path.file_name().ok_or_else(rejected)?.as_bytes()).map_err(|_| rejected())?;
-    let mut file = open_at(
-        &directory,
-        &name,
-        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-    )?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    directory.sync_all()?;
+    atomic_publish(&directory, &name, bytes, true, || Ok(()))?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+/// Prepare the app-owned private log directory before the first interactive draft.
+pub fn prepare_log_directory() -> Result<(), AppError> {
+    let home =
+        dirs::home_dir().ok_or_else(|| AppError::Plist("Home directory unavailable.".into()))?;
+    let library = open_directory(&home.join("Library"))?;
+    let logs = CString::new("Logs").map_err(|_| rejected())?;
+    // SAFETY: the constant name is relative to the trusted open Library directory.
+    if unsafe { libc::mkdirat(library.as_raw_fd(), logs.as_ptr(), 0o700) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(error.into());
+        }
+    }
+    let logs = open_at(&library, &logs, libc::O_RDONLY | libc::O_DIRECTORY)?;
+    let metadata = logs.metadata()?;
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
+        return Err(rejected());
+    }
+    let name = CString::new("Daemonic").map_err(|_| rejected())?;
+    if unsafe { libc::mkdirat(logs.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(error.into());
+        }
+    }
+    let directory = open_at(&logs, &name, libc::O_RDONLY | libc::O_DIRECTORY)?;
+    if directory.metadata()?.uid() != unsafe { libc::geteuid() } {
+        return Err(rejected());
+    }
+    use std::os::unix::fs::PermissionsExt;
+    directory.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+    logs.sync_all()?;
+    Ok(())
 }
 
 /// Require log destinations to have an existing real directory parent.
@@ -309,6 +397,18 @@ pub fn validate_log_parents(config: &PlistConfig) -> Result<(), AppError> {
         // canonical equality rejects non-platform symlinks in any parent component.
         if !parent.is_dir() || parent.canonicalize()? != parent {
             return Err(rejected());
+        }
+        let metadata = parent.metadata()?;
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
+            return Err(rejected());
+        }
+        for ancestor in parent.ancestors().skip(1) {
+            let metadata = ancestor.metadata()?;
+            if metadata.mode() & 0o022 != 0
+                && !(metadata.uid() == 0 && metadata.mode() & 0o1000 != 0)
+            {
+                return Err(rejected());
+            }
         }
         if let Ok(metadata) = std::fs::symlink_metadata(path) {
             if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.nlink() != 1 {
@@ -424,6 +524,9 @@ mod tests {
                 .into_owned(),
         );
         assert!(validate_log_parents(&config).is_ok());
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(validate_log_parents(&config).is_err());
     }
 
     #[test]

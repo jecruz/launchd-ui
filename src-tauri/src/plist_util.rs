@@ -75,23 +75,23 @@ fn extract_calendar_intervals(dict: &plist::Dictionary) -> Option<Vec<CalendarIn
         minute: d
             .get("Minute")
             .and_then(|v| v.as_unsigned_integer())
-            .map(|v| v as u32),
+            .and_then(|v| u32::try_from(v).ok()),
         hour: d
             .get("Hour")
             .and_then(|v| v.as_unsigned_integer())
-            .map(|v| v as u32),
+            .and_then(|v| u32::try_from(v).ok()),
         day: d
             .get("Day")
             .and_then(|v| v.as_unsigned_integer())
-            .map(|v| v as u32),
+            .and_then(|v| u32::try_from(v).ok()),
         weekday: d
             .get("Weekday")
             .and_then(|v| v.as_unsigned_integer())
-            .map(|v| v as u32),
+            .and_then(|v| u32::try_from(v).ok()),
         month: d
             .get("Month")
             .and_then(|v| v.as_unsigned_integer())
-            .map(|v| v as u32),
+            .and_then(|v| u32::try_from(v).ok()),
     };
 
     match value {
@@ -126,7 +126,10 @@ fn extract_u16_array(dict: &plist::Dictionary, key: &str) -> Vec<u16> {
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_unsigned_integer().map(|n| n as u16))
+                .filter_map(|v| {
+                    v.as_unsigned_integer()
+                        .and_then(|n| u16::try_from(n).ok().filter(|port| *port > 0))
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -192,6 +195,77 @@ pub fn parse_plist_bytes(bytes: &[u8]) -> Result<PlistConfig, AppError> {
         metadata: extract_launch_control_metadata(dict),
         raw_xml,
     })
+}
+
+fn calendar_valid(interval: &CalendarInterval) -> bool {
+    interval.minute.is_none_or(|v| v <= 59)
+        && interval.hour.is_none_or(|v| v <= 23)
+        && interval.day.is_none_or(|v| (1..=31).contains(&v))
+        && interval.weekday.is_none_or(|v| v <= 7)
+        && interval.month.is_none_or(|v| (1..=12).contains(&v))
+}
+
+/// Validate launchd schedule domains and nonzero TCP ports before any mutation.
+pub fn validate_config(config: &PlistConfig) -> Result<(), AppError> {
+    if config
+        .start_interval
+        .is_some_and(|v| v == 0 || v > i64::MAX as u64)
+        || config
+            .start_calendar_interval
+            .as_ref()
+            .is_some_and(|values| values.iter().any(|value| !calendar_valid(value)))
+        || config.metadata.ports.contains(&0)
+    {
+        return Err(AppError::Plist(
+            "Schedule values or ports are outside their supported integer domains.".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate raw schedule types before lossy extraction can hide malformed values.
+pub fn validate_raw_schedule(bytes: &[u8]) -> Result<(), AppError> {
+    let value = Value::from_reader(Cursor::new(bytes))
+        .map_err(|_| AppError::Plist("Invalid raw plist.".into()))?;
+    let dictionary = value
+        .as_dictionary()
+        .ok_or_else(|| AppError::Plist("Invalid raw plist.".into()))?;
+    let invalid = || AppError::Plist("Invalid launchd schedule integer or domain.".into());
+    if let Some(value) = dictionary.get("StartInterval") {
+        if !value
+            .as_unsigned_integer()
+            .is_some_and(|v| v > 0 && v <= i64::MAX as u64)
+        {
+            return Err(invalid());
+        }
+    }
+    if let Some(value) = dictionary.get("StartCalendarInterval") {
+        let values = match value {
+            Value::Array(values) => values.iter().collect::<Vec<_>>(),
+            Value::Dictionary(_) => vec![value],
+            _ => return Err(invalid()),
+        };
+        for value in values {
+            let value = value.as_dictionary().ok_or_else(invalid)?;
+            for (key, minimum, maximum) in [
+                ("Minute", 0, 59),
+                ("Hour", 0, 23),
+                ("Day", 1, 31),
+                ("Weekday", 0, 7),
+                ("Month", 1, 12),
+            ] {
+                if let Some(value) = value.get(key) {
+                    if !value
+                        .as_unsigned_integer()
+                        .is_some_and(|v| v >= minimum && v <= maximum)
+                    {
+                        return Err(invalid());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Serialize a launchd configuration before creating or replacing any file.
@@ -296,6 +370,9 @@ pub fn serialize_plist(config: &PlistConfig) -> Result<Vec<u8>, AppError> {
         || !config.metadata.ports.is_empty()
         || config.metadata.template.is_some()
         || config.metadata.migration_hint.is_some()
+        || config.metadata.health_status.is_some()
+        || config.metadata.health_detail.is_some()
+        || config.metadata.last_health_check_at.is_some()
     {
         let mut metadata = plist::Dictionary::new();
         if let Some(group) = config.metadata.group.as_ref() {
@@ -435,6 +512,27 @@ mod tests {
         file.write_all(xml.as_bytes()).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    #[test]
+    fn validates_schedule_domains_and_preserves_result_only_metadata() {
+        let config: PlistConfig = serde_json::from_value(serde_json::json!({"label": "safe", "raw_xml": "", "metadata": {"health_status": "healthy", "health_detail": "HTTP 200", "last_health_check_at": "123"}})).unwrap();
+        let parsed = parse_plist_bytes(&serialize_plist(&config).unwrap()).unwrap();
+        assert_eq!(parsed.metadata, config.metadata);
+        for (key, value) in [
+            ("Minute", "<integer>99</integer>"),
+            ("Hour", "<real>1.5</real>"),
+            ("Day", "<integer>0</integer>"),
+            ("Weekday", "<integer>9</integer>"),
+            ("Month", "<integer>13</integer>"),
+        ] {
+            let xml = format!(
+                "<plist><dict><key>StartCalendarInterval</key><dict><key>{key}</key>{value}</dict></dict></plist>"
+            );
+            assert!(validate_raw_schedule(xml.as_bytes()).is_err());
+        }
+        let xml = b"<plist><dict><key>Label</key><string>safe</string><key>LaunchControl</key><dict><key>Ports</key><array><integer>65536</integer><integer>0</integer><integer>65535</integer></array></dict></dict></plist>";
+        assert_eq!(parse_plist_bytes(xml).unwrap().metadata.ports, vec![65535]);
     }
 
     #[test]

@@ -14,5 +14,7 @@ const twentyFourHourFormatter = new Intl.DateTimeFormat(undefined, {
 export function formatEpochMillis24(epochMillis: string | number): string {
   const value = typeof epochMillis === "string" ? Number(epochMillis) : epochMillis
   if (!Number.isFinite(value)) return "—"
-  return twentyFourHourFormatter.format(new Date(value))
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return "—"
+  return twentyFourHourFormatter.format(date)
 }
